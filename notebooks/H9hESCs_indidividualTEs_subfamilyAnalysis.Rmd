@@ -1,0 +1,1613 @@
+---
+title: 'HESCs - primed Vs. Naive (and XACT WT Vs. Mutant)'
+subtitle: "Analysis of individual TE loci"
+author: 
+  - name: "Miguel Casanova^[Disease Transcriptomics Group, Instituto de Medicina Molecular, Faculdade de Medicina da Universidade de Lisboa]"
+    email: mcasanova@medicina.ulisboa.pt
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_notebook:
+    code_folding: hide
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/Data/H9hESCs/")
+```
+
+# {.tabset .tabset-pills}
+
+This notebook was made to collect information about differentially expressed TEs (but at the subfamily and individual TE levels), and extract information about more affected subfamilies/families.
+
+## Data loading {.tabset .tabset-pills}
+
+Let's start by loading the libraries we will need for the analysis
+
+```{r, warning=FALSE, results='hide',message=FALSE}
+suppressPackageStartupMessages(library("data.table"))
+suppressPackageStartupMessages(library("tidyverse"))
+suppressPackageStartupMessages(library("ggplot2"))
+suppressPackageStartupMessages(library("dplyr"))
+suppressPackageStartupMessages(library("tibble"))
+suppressPackageStartupMessages(library("clusterProfiler"))
+suppressPackageStartupMessages(library("fgsea"))
+suppressPackageStartupMessages(library("enrichplot"))
+suppressPackageStartupMessages(library("zeallot"))
+suppressPackageStartupMessages(library("ggpubr"))
+
+source("~/Resources/Scripts/RScripts/GTFScripts/GTF_Functions.R")
+```
+
+---
+
+### Load tables with individual TE information
+The first thing we do, is to load a table with all the information about individual TEs, subfamilies and genomic information. To do this, we use the `createTETable` function, that takes the UCSC repeatmasker annotation and creates three tables:
+
+- A table with information about individual TEs, their location and classification;
+- A table similar to the above, but with added genomic measures, like number and genomic size (and proportion) of subfamilies, families and classes of TEs;
+- A simplified table with information about all TE subclasses and respective genomic features.
+
+```{r}
+c(indTEAnnot, indTEAnnot_Extended, indTEAnnot_subfamilyStats) %<-% 
+  createTETable("~/Resources/CustomAnnotations/annotations/TEAnnotations/UCSCTableDownload/UCSC_rmsk_full_table.txt", 
+                removeLowComplexity = F,
+                order = T)
+```
+
+---
+
+### Load the DEA table for TE subfamilies {#TESub}
+We next, load the differential expression analysis table for TE subfamilies. 
+```{r}
+TE_Table_subfamilies <- (fread("~/Data/H9hESCs/analysis/results/subfamiliesTEs/DiffExpAnalysis/DEA_Tables/DETEs_naiveVsPrimed_allTEs.tsv"))
+# TE_Table_subfamilies <- (fread("~/Data/RTT/RodriguesEtAl/analysis/DETEs_Neurons_WTVsNeurons_mut_allTEs.tsv"))
+# Change the table, to remove the "TE_" suffix and add a Group column, with Up, Down, or NS (non-significant)
+TE_Table_subfamilies <- TE_Table_subfamilies %>% 
+  mutate(V1 = V1 %>% str_replace("^TE_", "")) %>%
+  # left_join(indTEAnnot_subfamilyStats[, c("subfamily", "family", "class")], by = c("V1" =  "subfamily")) %>%
+  # remove_rownames %>% 
+  # column_to_rownames(var="V1") %>%
+  mutate(Group = case_when(
+    (TE_Table_subfamilies$log2FoldChange > 1) & (TE_Table_subfamilies$padj < 0.05) ~ "Up",
+    (TE_Table_subfamilies$log2FoldChange < -1) & (TE_Table_subfamilies$padj < 0.05) ~ "Down",
+    TRUE ~ "NS")) %>%
+  arrange(padj)
+
+TE_Table_subfamilies %>% 
+  DT::datatable()
+```
+We can use this table to get the names of the top differentially expressed subfamilies.
+**We start by getting the downregulated subfamilies**
+```{r}
+TE_Table_subfamilies_Down <- 
+  TE_Table_subfamilies[which(TE_Table_subfamilies$log2FoldChange < -1 & 
+                               TE_Table_subfamilies$padj < 0.05), ] # Get the downregulated TE subfamilies
+TE_Table_subfamilies_Down_sortedStat <- TE_Table_subfamilies_Down[order(TE_Table_subfamilies_Down$stat), ] # Sort your results by Wald Statistic
+top_TE_subfamilies_down <- TE_Table_subfamilies_Down_sortedStat$V1[1:15] # Select the top TEs
+
+na.omit(top_TE_subfamilies_down)
+```
+**We can then get the upregulated subfamilies**
+```{r}
+TE_Table_subfamilies_Up <- TE_Table_subfamilies[which(TE_Table_subfamilies$log2FoldChange > 1 &
+                                                        TE_Table_subfamilies$padj < 0.05), ] # Get the upredulated genes
+TE_Table_subfamilies_Up_sorted <- TE_Table_subfamilies_Up[order(TE_Table_subfamilies_Up$stat, decreasing = T), ] # Sort your results by Wald Statistic
+top_TE_subfamilies_Up <- TE_Table_subfamilies_Up_sorted$V1[1:15]
+
+na.omit(top_TE_subfamilies_Up)
+```
+
+---
+
+### Load the DEA table for individual TEs
+We next load the differential expression analysis table for the individual TE loci
+```{r, fig.width=12}
+TE_Table_loci <- (fread("~/Data/H9hESCs/analysis/results/individualTEs/DiffExpAnalysis/DEA_Tables/individualDETEs_naiveVsPrimed_allTEs.tsv"))
+
+# We can try to use much stricter threshold for the DEA.
+#TE_Table_loci <- (fread("~/Data/H9hESCs/analysis/results/DETEs_naiveVsPrimed_allTEs_strictThreshold.tsv"))
+
+# The following loads the RTT dataset DEA table.
+#TE_Table_loci <- (fread("~/Data/RTT/RodriguesEtAl/analysis/DETEs_Neurons_WTVsNeurons_mut_allTEs_individualTEs.tsv"))
+
+TE_Table_individual <- TE_Table_loci %>% 
+  mutate(V1 = V1 %>% str_replace("TE_", "")) %>%
+  left_join(indTEAnnot_Extended, by = c("V1" =  "individualRepeat")) %>%
+  remove_rownames %>% 
+  mutate(Group = case_when(
+    (TE_Table_loci$log2FoldChange > 1) & (TE_Table_loci$padj < 0.05) ~ "Up",
+    (TE_Table_loci$log2FoldChange < -1) & (TE_Table_loci$padj < 0.05) ~ "Down",
+    TRUE ~ "NS")) %>%
+  arrange(padj) %>%
+  column_to_rownames(var="V1") 
+
+TE_Table_individual
+```
+
+---
+
+## Processing of data {.tabset .tabset-pills}
+
+### Calculate percentage of DETEs per subfamily
+Let's calculate the percentage of TEs that are up, down or non-significant, for each subfamily.
+```{r}
+TE_subfamilies_percentages <- TE_Table_individual %>% 
+  group_by(subfamily, Group) %>% 
+  dplyr::summarise(n = n()) %>% 
+  spread(Group, n, fill = 0) %>%
+  mutate(countSubfamily = Down + NS + Up, .after = subfamily) %>%
+  mutate(percUp = round(Up/countSubfamily*100, 2)) %>%
+  mutate(percDown = round(Down/countSubfamily*100, 2)) %>%
+  mutate(percNS = round(NS/countSubfamily*100, 2)) %>%
+  left_join(indTEAnnot_subfamilyStats, by = c("subfamily" =  "subfamily")) %>%
+  dplyr::select(subfamily, TotalNumberSubfamily = countSubfamily.y, countSubfamily = countSubfamily.x, Up, Down, NS, percUp, percDown, percNS)
+```
+```{r}
+TE_subfamilies_percentages %>% 
+  DT::datatable(extensions = 'Buttons',
+            options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+```
+**Let's subset the table, to give us only the families with at least 50 individual loci.**
+
+We can then arrange the table by **percentage of TEs showing upregulation**.
+```{r}
+TE_subfamilies_percentages %>% 
+  filter(countSubfamily > 30) %>%
+  arrange(-percUp) %>%
+  DT::datatable()
+```
+And next, we can create a table arranged with TE subfamilies showing higher **percentage of downregulated TEs**.
+```{r}
+TE_subfamilies_percentages %>% 
+  filter(countSubfamily > 30) %>%
+  arrange(-percDown) %>%
+  DT::datatable()
+```
+## Data visualization {.tabset .tabset-pills}
+
+### Plotting graphs for TE families
+Make a plot with all TEs with detectable reads, organized by family
+```{r, fig.width=12, fig.height=10}
+ggplot(TE_Table_individual, aes(x = reorder(family, -log2FoldChange, FUN = median), # Use the reorder function, to order subfamilies by median value.
+                                y = log2FoldChange)) +
+  geom_point(position = "jitter",
+             size = .3,
+             alpha = 0.5,
+             aes(color = family)) +
+  geom_boxplot(width = 0.15, fill = "white", alpha = .6) +
+  geom_violin(alpha = 0.2, 
+              trim = F, 
+              size = .3) +
+  labs(title = "Log2 fold changes for TE families in Naive vs. Primed hESCs", 
+       y = "log2FoldChange", 
+       x = "") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(alpha=1))) +
+  theme(plot.title = element_text(size = 16,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = "none")
+```
+Add a graph with points scalled by number of basemean reads per individual TE.
+```{r, fig.width=12, fig.height=10}
+ggplot(TE_Table_individual, aes(x = reorder(family, -log2FoldChange, FUN = median), 
+                                y = log2FoldChange)) + # Use the reorder function, to order subfamilies by median value.
+  geom_point(position = "jitter",
+             alpha = 0.25,
+             aes(color = family, size = baseMean)) +
+  geom_boxplot(width = 0.15, fill = "white", alpha = .6) +
+  geom_violin(alpha = 0.2,
+              trim = F,
+              size = .3,
+              scale = "width") +
+  labs(title = "Log2 fold changes for TE families in Naive vs. Primed hESCs", 
+       y = "log2FoldChange", 
+       x = "") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(alpha=1))) +
+  theme(plot.title = element_text(size = 16,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = "none")
+```
+Add density plots for the log2FoldChange distribution across the different subfamilies.
+```{r, fig.width=12,fig.height=15}
+
+ggplot(TE_Table_individual, aes(x = log2FoldChange, color = family, fill = family)) +
+  geom_density(alpha = 0.2, 
+               size = 0.5,
+               aes(color = family)) +
+  geom_histogram(aes(y=..density..),
+                 colour="black", 
+                 fill="transparent") +
+  geom_vline(color = "black", 
+             linetype = "dashed", 
+             size = .7, 
+             xintercept = 0) +
+  facet_wrap(~ family, 
+             ncol = 3, 
+             scales = "free")  +
+  xlim(-20,20) +
+  labs(title = "Density plots of log2 fold changes for TE families in Naive vs. Primed hESCs",
+       x = "log2FoldChange") +
+  theme_bw() +
+  theme(plot.title = element_text(size = 14,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        legend.position = "none",
+        strip.text.x = element_text(
+          size = 10,
+          color = "black",
+          face = "bold"),
+        strip.background = element_rect(
+          color = "black",
+          fill = adjustcolor("blue", alpha.f = 0.1),
+          size = 1))
+```
+
+- For separating samples on the same x, according to up, down or NS, use aes(group = group)
+- Cut log2fold changes to eliminate values > or < than |log2FC| of ~5.
+- Do proportion tests, to check which percentage is positive or negative (is differential expression random, or there's a bias towards activation or repression, for a given family?)
+- Do interquartile range (IQR)?
+
+Make the same plot as above, but divide each class in downregulated, upregulated and non-statistically differentially expressed.
+```{r, fig.width=12}
+ggplot(TE_Table_individual, aes(x = reorder(family, -log2FoldChange, FUN = median), y = log2FoldChange)) +
+  geom_point(aes(color = Group),
+             position = position_jitterdodge(jitter.width = .2, jitter.height = 0.5, dodge.width = .7), 
+             size = .6, 
+             alpha = 0.5) +
+  # geom_violin(alpha = 0.2, 
+  #             trim = F, 
+  #             size = .3) +
+  geom_boxplot(aes(fill = Group),
+               position = position_dodge(width = .7),
+               width = 0.5,
+               alpha = .1,
+               outlier.shape = NA) +
+  labs(title = "Log2 fold changes for TE families in Naive vs. Primed hESCs", 
+       y = "log2FoldChange", 
+       x = "") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(alpha=1))) +
+  theme(plot.title = element_text(size = 16,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = "right")
+```
+### Plotting graphs for TE subfamilies
+Look at the subfamilies within certain families.
+```{r, fig.width=12}
+ggplot(TE_Table_individual[TE_Table_individual$family == "L1",], aes(x=reorder(subfamily, -log2FoldChange, FUN = median), y=log2FoldChange)) +
+  geom_point(position = "jitter", size = .6, alpha = 0.5, aes(color = subfamily)) +
+  geom_violin(alpha = 0.2, trim = F, size = .3, fill = "transparent") +
+  geom_boxplot(width = 0.2, fill = "transparent", alpha = .1) +
+  labs(title = "Log2 fold changes for ERVK subfamilies in Naive vs. Primed hESCs", 
+       y = "log2FoldChange", 
+       x = "") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(alpha=1))) +
+  theme(plot.title = element_text(size = 16,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = "none")
+```
+
+---
+
+We can now look at the top differentially expressed subfamilies, determined in the differential expression analysis performed for TE [subfamilies](#TESub).
+
+Look at the top **downregulated subfamilies**.
+```{r, fig.width=10}
+ggplot(TE_Table_individual[TE_Table_individual$subfamily %in% top_TE_subfamilies_down,], aes(x=reorder(subfamily, log2FoldChange, FUN = median), y=log2FoldChange)) +
+  geom_point(aes(color = Group),
+             position = position_jitterdodge(jitter.width = .2, jitter.height = 0.5, dodge.width = .7), 
+             size = 2.5, 
+             alpha = 0.6) +
+  scale_color_manual(values = c("Up" = "#0072B2", "Down" = "#D55E00", "NS" = "gray40")) +
+
+  # geom_violin(alpha = 0.2, 
+  #             trim = F, 
+  #             size = .3) +
+  # geom_boxplot(aes(fill = Group),
+  #              position = position_dodge(width = .7),
+  #              width = 0.5,
+  #              alpha = .1,
+  #              outlier.shape = NA) +
+  labs(title = "Log2 fold changes for individual TEs of the top-15 TE subfamilies\nupregulated in primed hESCs", 
+       y = "log2FoldChange", 
+       x = "") +
+  theme_bw() +
+  guides(colour = guide_legend(title = "TE loci", override.aes = list(alpha=1, size = 5))) +
+  theme(plot.title = element_text(size = 16,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = "bottom")
+```
+```{r, fig.width=12}
+dotplot_primed_subfamilies <- ggplot(TE_Table_individual[TE_Table_individual$subfamily %in% top_TE_subfamilies_down,], 
+                                     aes(x=reorder(subfamily, log2FoldChange, FUN = median), y=log2FoldChange)) +
+  geom_point(aes(fill = Group),        # Use fill instead of color for inside point color
+             shape = 21,               # Shape 21 supports both fill and color
+             color = "black",          # Black outline
+             stroke = 0.4,             # Thickness of the black outline
+             position = position_jitterdodge(jitter.width = .3, jitter.height = 0.5, dodge.width = .7), 
+             size = 3, 
+             alpha = 0.6) +
+  scale_fill_manual(values = c("Up" = "#0072B2", "Down" = "#D55E00", "NS" = "gray40")) +  # Maintain the fill colors
+  labs(title = "Log2 fold changes for individual TEs of the top-15 TE subfamilies\nupregulated in primed hESCs", 
+       y = "log2FoldChange", 
+       x = "") +
+  theme_bw() +
+  guides(fill = guide_legend(title = "TE loci", override.aes = list(alpha=1, size = 5))) +
+  theme(plot.title = element_text(size = 16,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = "bottom")
+
+dotplot_primed_subfamilies
+```
+
+Look at the top **upregulated families**.
+```{r, fig.width=10}
+ggplot(TE_Table_individual[TE_Table_individual$subfamily %in% top_TE_subfamilies_Up,], aes(x=reorder(subfamily, -log2FoldChange, FUN = median), y=log2FoldChange)) +
+  geom_point(aes(color = Group),
+             position = position_jitterdodge(jitter.width = .2, jitter.height = 0.5, dodge.width = .7), 
+             size = 1, 
+             alpha = 0.8) +
+  scale_color_manual(values = c("Up" = "red", "Down" = "blue", "NS" = "gray40")) +
+  # geom_violin(alpha = 0.2, 
+  #             trim = F, 
+  #             size = .3) +
+  # geom_boxplot(aes(fill = Group),
+  #              position = position_dodge(width = .7),
+  #              width = 0.5,
+  #              alpha = .1,
+  #              outlier.shape = NA) +
+  labs(title = "Log2 fold changes for individual TEs of the top-15 upregulated TE subfamilies\nassociated with naive hESCs", 
+       y = "log2FoldChange", 
+       x = "") +
+  theme_bw() +
+  guides(colour = guide_legend(title = "TE loci", override.aes = list(alpha=1, size = 5))) +
+  theme(plot.title = element_text(size = 16,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = "bottom")
+```
+```{r, fig.width=12}
+dotplot_naive_subfamilies <- ggplot(TE_Table_individual[TE_Table_individual$subfamily %in% top_TE_subfamilies_Up,], aes(x=reorder(subfamily, -log2FoldChange, FUN = median), y=log2FoldChange)) +
+  geom_point(aes(fill = Group),        # Use fill instead of color for inside point color
+             shape = 21,               # Shape 21 supports both fill and color
+             color = "black",          # Black outline
+             stroke = 0.4,             # Thickness of the black outline
+             position = position_jitterdodge(jitter.width = .3, jitter.height = 0.5, dodge.width = .7), 
+             size = 3, 
+             alpha = 0.6) +
+  scale_fill_manual(values = c("Up" = "#0072B2", "Down" = "#D55E00", "NS" = "gray40")) +  # Maintain the fill colors
+  labs(title = "Log2 fold changes for individual TEs of the top-15 TE subfamilies\nupregulated in naive hESCs", 
+       y = "log2FoldChange", 
+       x = "") +
+  theme_bw() +
+  guides(fill = guide_legend(title = "TE loci", override.aes = list(alpha=1, size = 5))) +
+  theme(plot.title = element_text(size = 16,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = "bottom")
+
+dotplot_naive_subfamilies
+```
+Combined panel
+
+```{r, fig.height=10, fig.width=10}
+# Arrange the two plots vertically and keep one legend at the bottom
+combined_dotplots_TEs_individual <- ggarrange(
+  dotplot_naive_subfamilies,
+  dotplot_primed_subfamilies, 
+  ncol = 1,              # Arrange vertically
+  common.legend = TRUE,  # Share the same legend
+  legend = "bottom",     # Place legend at the bottom
+  labels = c("A", "B")
+)
+
+# Display the combined plot
+combined_dotplots_TEs_individual
+```
+
+## Gene set enrichment analysis {.tabset .tabset-pills}
+
+### Creating "TEsets" for TE subfamilies
+
+In order to determine which TE subfamilies are more strongly affected, several strategies can be used. One of them is using GSEA, using genesets of TE subfamilies, each containing all individual TEs belonging to that subfamily (and having detectable reads).
+
+To create the genesets, we need to make a named list, in which the name of each element is the subfamily, and each element is composed of all of the individual TE loci. This is easily done, using the following command:
+```{r}
+# Create a named list using TE subfamily, and containing the individual TE loci
+DEA_TE_geneset <- split(rownames(TE_Table_individual), TE_Table_individual$subfamily)
+```
+Let's visualize the list we have just created.
+```{r}
+DEA_TE_geneset %>% 
+  head() %>% 
+  lapply(head)
+```
+We can also create genesets for all subfamilies, containing all the individual TE loci for ALL the TE loci annotated in the genome (independently of having or not, detectable reads in the dataset).
+```{r}
+DEA_TE_geneset_AllTEs <- split(indTEAnnot$individualRepeat, indTEAnnot$subfamily)
+```
+Let's visualize the list we have just created.
+```{r}
+DEA_TE_geneset_AllTEs %>% 
+  head() %>% 
+  lapply(head)
+```
+
+### Creating ranked list of TEs (Wald Statistics)
+
+We can next use these tables to perform GSEA: use a ranked list of DETEs to calculate a positive or negative association with specific genesets.
+
+We start by creating a Rank TE table, for GSEA analysis (to use with Broad Institute's GSEA app or `fgsea` library).
+
+```{r}
+RNK_NaiveVsPrimed_TEs <- data.table(Gene_Name = rownames(TE_Table_individual), stat = TE_Table_individual$stat) #These are 2 columns from our deseq2 output that we need for GSEA
+RNK_NaiveVsPrimed_TEs <- subset(RNK_NaiveVsPrimed_TEs, stat != "NA")
+
+# Let's write this table.
+#write.table(RNK_NaiveVsPrimed, "~/Data/H9hESCs/analysis/results/subfamiliesTEs/RNK_NaiveVsPrimed.rnk",quote=F,sep="\t", row.names = F)
+```
+We can visualize the TE loci with the most positive or negative statistics.
+```{r}
+head(RNK_NaiveVsPrimed_TEs[order(RNK_NaiveVsPrimed_TEs$stat, decreasing = TRUE), ])
+```
+```{r}
+head(RNK_NaiveVsPrimed_TEs[order(RNK_NaiveVsPrimed_TEs$stat, decreasing = FALSE), ])
+```
+
+### Performing geneset enrichment analysis
+
+Now, run the fgsea algorithm with 10000 permutations, using the **geneset created with all TEs with detectable reads**.
+```{r}
+RNK_NaiveVsPrimed_TEs_deframed <- deframe(RNK_NaiveVsPrimed_TEs)
+
+fgseaResAll <- fgseaMultilevel(
+  pathways=DEA_TE_geneset,
+  stats=RNK_NaiveVsPrimed_TEs_deframed, 
+  eps = 0.0,
+  nPermSimple = 10000,
+  minSize = 15,
+  maxSize = Inf)
+
+fgseaResAll
+```
+We can try to run fgsea, using **genesets containing all of the annotated TEs**.
+```{r}
+RNK_NaiveVsPrimed_TEs_deframed <- deframe(RNK_NaiveVsPrimed_TEs)
+
+fgseaResAll2 <- fgseaMultilevel(
+  pathways=DEA_TE_geneset_AllTEs,
+  stats=RNK_NaiveVsPrimed_TEs_deframed, 
+  eps = 0.0,
+  nPermSimple = 10000,
+  minSize = 15,
+  maxSize = Inf)
+
+fgseaResAll2
+```
+In fact, the way that GSEA works, it will focus on the genes that have stats, leaving the genes without stats (without reads), out. As such, the results using the Genesets with expressed TEs vs. Genesets with all TEs, is fairly similar.
+
+As such, let's just use the Geneset of expressed TEs and tidy the results and show it in a nice table.
+```{r}
+fgseaResTidy <- fgseaResAll %>%
+  as_tibble() %>%
+  arrange(desc(NES))
+
+fgseaResTidy %>% 
+  dplyr::select(-leadingEdge, -ES) %>% 
+  arrange(padj) %>% 
+  DT::datatable()
+```
+Geneset with all annotated TEs: tidy the results and show it in a nice table.
+```{r}
+fgseaResTidy <- fgseaResAll2 %>%
+  as_tibble() %>%
+  arrange(desc(NES))
+
+fgseaResTidy %>% 
+  dplyr::select(-leadingEdge, -ES) %>% 
+  arrange(padj) %>% 
+  DT::datatable()
+```
+**Using the full geneset, or only the genesets containing the TEs with detectable reads, gives similar results!**
+
+Plot the normalized enrichment scores. Color the bar indicating whether or not the TE subfamily is significantly up or downregulated.
+```{r, fig.width=6, fig.height=7}
+# fgseaResTidySorted <- fgseaResTidy[order(fgseaResTidy$padj),]
+# 
+# ggplot(fgseaResTidySorted[c(1:30),], 
+#        aes(reorder(pathway, NES), NES)) +
+#   geom_col(aes(fill=padj<0.05)) +
+#   coord_flip() +
+#   labs(x="TE subfamily", y="Normalized Enrichment Score",
+#        title="Functional Enrichment analysis for TE subfamilies - Naive Vs. Primed") + 
+#   theme_minimal()
+
+fgseaResTidySorted_Up <- fgseaResAll[NES > 0][head(order(padj), n=20)]
+fgseaResTidySorted_Down <- fgseaResAll[NES < 0][head(order(padj), n=20)]
+fgseaResTidySorted <- rbind(fgseaResTidySorted_Up, fgseaResTidySorted_Down)
+
+ggplot(fgseaResTidySorted, 
+       aes(reorder(pathway, NES), NES)) +
+  geom_col(aes(fill = padj < 0.01)) +
+  coord_flip() +
+  labs(x="TE subfamily", y="Normalized Enrichment Score",
+       title="Functional Enrichment analysis for TE subfamilies\nNaive Vs. Primed") + 
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   colour = 'black'),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = c(0.9,0.1),
+        legend.background = element_rect(fill = "white",
+                                         size = 0.5,
+                                         linetype = 3,
+                                         colour ="black"))
+```
+```{r, fig.width=6, fig.height=7}
+# fgseaResTidySorted <- fgseaResTidy[order(fgseaResTidy$padj),]
+# 
+# ggplot(fgseaResTidySorted[c(1:30),], 
+#        aes(reorder(pathway, NES), NES)) +
+#   geom_col(aes(fill=padj<0.05)) +
+#   coord_flip() +
+#   labs(x="TE subfamily", y="Normalized Enrichment Score",
+#        title="Functional Enrichment analysis for TE subfamilies - Naive Vs. Primed") + 
+#   theme_minimal()
+
+fgseaResTidySorted_Up <- fgseaResAll[NES > 0][head(order(padj), n=20)]
+fgseaResTidySorted_Down <- fgseaResAll[NES < 0][head(order(padj), n=20)]
+fgseaResTidySorted <- rbind(fgseaResTidySorted_Up, fgseaResTidySorted_Down)
+
+ggplot(fgseaResTidySorted, 
+       aes(reorder(pathway, NES), NES)) +
+  geom_col(aes(fill = padj < 0.01)) +
+  coord_flip() +
+  labs(x="TE subfamily", y="Normalized Enrichment Score",
+       title="Functional Enrichment analysis for TE subfamilies\nNaive Vs. Primed") + 
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   colour = 'black'),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = "none")
+```
+```{r, fig.width=7, fig.height=8}
+library(ggplot2)
+library(scales)
+
+ggplot(fgseaResTidySorted, aes(x = reorder(pathway, NES), y = NES)) +
+  geom_col(aes(fill = NES), color = "black", lwd = 0.3) +  # Add a black border around the bars
+  scale_fill_gradient2(low = "#D55E00", mid = "white", high = "#0072B2", midpoint = 0, 
+                       limits = c(min(fgseaResTidySorted$NES), max(fgseaResTidySorted$NES)),
+                       oob = squish) +  # Gradient based on NES value
+  geom_text(aes(label = ifelse(padj < 0.01, "*", "")), 
+            hjust = ifelse(fgseaResTidySorted$NES > 0, -0.2, 1.2), 
+            vjust = 0.8,  # Adjust vertical alignment to the center of the bars
+            size = 4) +  # Adjust hjust based on positive or negative NES
+  coord_flip() +
+  labs(x = "TE subfamily", y = "Normalized Enrichment Score",
+       title = "Functional Enrichment Analysis for TE Subfamilies",
+       subtitle = "Naive vs. Primed hESCs",
+       fill = "NES") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 12, face = "italic", hjust = 0.5),
+        axis.text.x = element_text(size = 10, colour = 'black'),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10, colour = "black"),
+        legend.position = "right")
+```
+
+
+And we can now plot enrichment plots for specific subfamilies.
+```{r, fig.height=3,fig.width=6}
+plotEnrichment(DEA_TE_geneset[["HERVH-int"]],
+               RNK_NaiveVsPrimed_TEs_deframed) + labs(title="HERVH-int subfamily")
+
+plotEnrichment(DEA_TE_geneset[["LTR7"]],
+               RNK_NaiveVsPrimed_TEs_deframed) + labs(title="LTR7 subfamily")
+```
+```{r, fig.height=3.3,fig.width=11}
+library(cowplot)
+
+p1 <- plotEnrichment(DEA_TE_geneset[["HERVH-int"]],
+                     RNK_NaiveVsPrimed_TEs_deframed) + 
+  labs(title="HERVH-int subfamily") +
+  theme(plot.margin = margin(t = 20, r = 0, b = 0, l = 0))
+
+p2 <- plotEnrichment(DEA_TE_geneset[["LTR7"]],
+                     RNK_NaiveVsPrimed_TEs_deframed) + labs(title="LTR7 subfamily") +
+  theme(plot.margin = margin(t = 20, r = 0, b = 0, l = 0))
+
+combined_plot <- plot_grid(p1, p2, ncol = 2, labels = c("A", "B"), label_fontfamily = "Times", label_size = 20)
+#combined_plot <- ggarrange(p1, p2, ncol = 2, nrow = 1, labels = c("A", "B"))
+
+combined_plot
+```
+
+We can also make a table plot to explore the top pathways.
+```{r, fig.width=10, fig.height=10}
+# topPathwaysUp <- fgseaResAll[ES > 0][head(order(padj), n=15), pathway]
+# topPathwaysDown <- fgseaResAll[ES < 0][head(order(padj), n=15), pathway]
+# topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+
+topPathwaysUp <- fgseaResAll[ES > 0][head(order(padj), n=20), pathway]
+topPathwaysDown <- fgseaResAll[ES < 0][head(order(padj), n=20), pathway]
+topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+
+# topPathwaysUp <- fgseaResAll[NES > 0][head(order(padj), n=15), ][order(NES, decreasing = T), pathway]
+# topPathwaysDown <- fgseaResAll[NES < 0][head(order(padj), n=15), ][order(NES, decreasing = T), pathway]
+# topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+
+GSEATable <- plotGseaTable(pathways = DEA_TE_geneset[topPathways], 
+                           stats = RNK_NaiveVsPrimed_TEs_deframed, 
+                           fgseaRes = fgseaResAll, 
+                           gseaParam=0.5,
+                           render = FALSE)
+
+GSEATableUp <- plotGseaTable(pathways = DEA_TE_geneset[topPathwaysUp], 
+                           stats = RNK_NaiveVsPrimed_TEs_deframed, 
+                           fgseaRes = fgseaResAll, 
+                           gseaParam=0.5,
+                           render = FALSE)
+
+GSEATableDown <- plotGseaTable(pathways = DEA_TE_geneset[rev(topPathwaysDown)], 
+                           stats = RNK_NaiveVsPrimed_TEs_deframed, 
+                           fgseaRes = fgseaResAll, 
+                           gseaParam=0.5,
+                           render = FALSE)
+```
+```{r}
+# Select top 20 subfamilies with NES > 0 (upregulated) based on the lowest padj values
+topPathwaysUp <- fgseaResAll[NES > 0][order(padj)][1:20, ]
+
+# Select top 20 subfamilies with NES < 0 (downregulated) based on the lowest padj values
+topPathwaysDown <- fgseaResAll[NES < 0][order(padj)][1:20, ]
+
+# Order by NES within each group
+topPathwaysUp <- topPathwaysUp[order(NES, decreasing = TRUE), pathway]  # Order upregulated by NES (descending)
+topPathwaysDown <- topPathwaysDown[order(NES, decreasing = FALSE), pathway]  # Order downregulated by NES (ascending)
+
+# Combine the two sets of pathways, with downregulated ones in reverse order
+topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+
+# GSEA Table for combined top pathways (both up and down)
+GSEATable <- plotGseaTable(pathways = DEA_TE_geneset[topPathways], 
+                           stats = RNK_NaiveVsPrimed_TEs_deframed, 
+                           fgseaRes = fgseaResAll, 
+                           gseaParam=0.5,
+                           render = FALSE)
+
+# GSEA Table for top upregulated pathways
+GSEATableUp <- plotGseaTable(pathways = DEA_TE_geneset[topPathwaysUp], 
+                             stats = RNK_NaiveVsPrimed_TEs_deframed, 
+                             fgseaRes = fgseaResAll, 
+                             gseaParam=0.5,
+                             render = FALSE)
+
+# GSEA Table for top downregulated pathways
+GSEATableDown <- plotGseaTable(pathways = DEA_TE_geneset[rev(topPathwaysDown)], 
+                               stats = RNK_NaiveVsPrimed_TEs_deframed, 
+                               fgseaRes = fgseaResAll, 
+                               gseaParam=0.5,
+                               render = FALSE)
+
+```
+
+```{r, fig.width=10, fig.height=10}
+as_ggplot(GSEATable)
+```
+```{r, fig.width=8, fig.height=7}
+as_ggplot(GSEATableUp)
+```
+```{r, fig.width=8, fig.height=7}
+as_ggplot(GSEATableDown)
+```
+```{r, fig.width=12, fig.height=9}
+GSEA_naive_subfamilies <- as_ggplot(GSEATableUp) + theme(plot.margin = margin(t = 20, r = 0, b = 0, l = -180))
+GSEA_primed_subfamilies <- as_ggplot(GSEATableDown) + theme(plot.margin = margin(t = 20, r = 0, b = 0, l = -180))
+
+combined_GSEA <- plot_grid(
+  GSEA_naive_subfamilies, 
+  GSEA_primed_subfamilies, 
+  ncol = 2, 
+  labels = c("A", "B"), 
+  label_fontfamily = "Times",  # Set font to Times
+  label_size = 20  # Increase label size
+)
+combined_GSEA
+```
+
+In addition, we can choose specific pathways to visualize their enrichment profiles.
+```{r, fig.width=10}
+selectedPathways <- c("SVA_D", "SVA_F", "HERK_Int", "LTR5_Hs",
+                      "HERVH-int", "L1MEf", "LTR7")
+
+GSEATable <- plotGseaTable(pathways = DEA_TE_geneset[selectedPathways], 
+                           stats = RNK_NaiveVsPrimed_TEs_deframed, 
+                           fgseaRes = fgseaResAll, 
+                           gseaParam=0.5,
+                           render = FALSE)
+```
+```{r, fig.width=10}
+as_ggplot(GSEATable)
+```
+### Log2FoldChanges of TE subfamilies with highest NES
+We can visualize the log2FoldChange of the individual loci of the identified subfamilies.
+```{r}
+TE_Table_individual_GSEA <- TE_Table_individual %>% 
+  mutate(GSEA = case_when(
+    (TE_Table_individual$subfamily %in% fgseaResAll[ES > 0]$pathway) ~ "NES>0",
+    (TE_Table_individual$subfamily %in% fgseaResAll[ES < 0]$pathway) ~ "NES<0",
+    TRUE ~ "NS")) 
+```
+
+```{r, fig.width=12}
+p1 <- ggplot(TE_Table_individual_GSEA[TE_Table_individual_GSEA$subfamily %in% topPathwaysUp,], aes(x=reorder(subfamily, -log2FoldChange, FUN = median), y=log2FoldChange, color = Group, size = Group)) +
+  geom_point(position = position_jitterdodge(jitter.width = .2, jitter.height = 0.5, dodge.width = .7), 
+             #size = .3, 
+             alpha = 0.5) +
+  #scale_x_discrete(limits = topPathwaysUp) +
+  scale_color_manual(values = c("Up" = "red", "Down" = "blue", "NS" = "black")) +
+  scale_size_manual(values = c("Up" = 1, "Down" = 1, "NS" = .1)) +
+  # geom_violin(alpha = 0.2, 
+  #             trim = F, 
+  #             size = .3) +
+  # geom_boxplot(aes(fill = Group),
+  #              position = position_dodge(width = .7),
+  #              width = 0.5,
+  #              alpha = .1,
+  #              outlier.shape = NA) +
+  labs(title = "Top-20 upregulated TE subfamilies", 
+       y = "log2FoldChange", 
+       x = "") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 0.8))) + # Over-ride aesthetics for figure legend.
+  geom_hline(yintercept = 0, colour = "red", linetype = 2, lwd = .8) + # Add line to intercept -log10(0.05).
+
+  theme(plot.title = element_text(size = 12,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = "None",
+        legend.background = element_rect(fill = "transparent",
+                                         size = 0.5, 
+                                         linetype = 3, 
+                                         colour ="transparent"),
+        legend.title = element_blank())
+
+p2 <- ggplot(TE_Table_individual_GSEA[TE_Table_individual_GSEA$subfamily %in% topPathwaysDown,], aes(x=reorder(subfamily, -log2FoldChange, FUN = median), y=log2FoldChange, color = Group, size = Group)) +
+  geom_point(position = position_jitterdodge(jitter.width = .2, jitter.height = 0.5, dodge.width = .7), 
+             #size = .3, 
+             alpha = 0.5) +
+  #scale_x_discrete(limits = topPathwaysDown) +
+  scale_color_manual(values = c("Up" = "red", "Down" = "blue", "NS" = "black")) +
+  scale_size_manual(values = c("Up" = 1, "Down" = 1, "NS" = .1)) +
+  # geom_violin(alpha = 0.2, 
+  #             trim = F, 
+  #             size = .3) +
+  # geom_boxplot(aes(fill = Group),
+  #              position = position_dodge(width = .7),
+  #              width = 0.5,
+  #              alpha = .1,
+  #              outlier.shape = NA) +
+  labs(title = "Top-20 downregulated TE subfamilies", 
+       y = "log2FoldChange", 
+       x = "") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 0.8))) + # Over-ride aesthetics for figure legend.
+  geom_hline(yintercept = 0, colour = "red", linetype = 2, lwd = .8) + # Add line to intercept -log10(0.05).
+
+  theme(plot.title = element_text(size = 12,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = c(0.9,1.1),
+        legend.background = element_rect(fill = "transparent",
+                                         size = 0.5, 
+                                         linetype = 3, 
+                                         colour ="transparent"),
+        legend.title = element_blank())
+
+p <- cowplot::plot_grid(p1, p2)
+title <- cowplot::ggdraw() + cowplot::draw_label("Log2 fold changes for individual TEs in primed vs. naive hESCs", fontface='bold', size = 14)
+cowplot::plot_grid(title, p, ncol=1, rel_heights=c(0.1, 1)) # rel_heights values control title margins
+```
+```{r, fig.width=12}
+p1 <- ggplot(TE_Table_individual_GSEA[TE_Table_individual_GSEA$subfamily %in% topPathwaysUp,], aes(x=reorder(subfamily, -log2FoldChange, FUN = median), y=log2FoldChange)) +
+  geom_jitter(aes(color = Group, size = Group), alpha = 0.2, width = .15) +
+  #scale_x_discrete(limits = topPathwaysUp) +
+  scale_color_manual(values = c("Up" = "red", "Down" = "blue", "NS" = "gray")) +
+  scale_size_manual(values = c("Up" = 1.5, "Down" = 1.5, "NS" = .5)) +
+  # geom_violin(alpha = 0.2,
+  #             trim = F,
+  #             size = .4) +
+  stat_summary(fun = "median", 
+               fun.min = "median", 
+               fun.max= "median", 
+               size= 0.6,
+               color = "black", 
+               geom = "crossbar",
+               width = .5) +
+  # geom_boxplot(aes(fill = Group),
+  #              position = position_dodge(width = .7),
+  #              width = 0.5,
+  #              alpha = .1,
+  #              outlier.shape = NA) +
+  labs(title = "Top-20 upregulated TE subfamilies", 
+       y = "log2FoldChange", 
+       x = "") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 0.8))) + # Over-ride aesthetics for figure legend.
+  geom_hline(yintercept = 0, colour = "red", linetype = 3, lwd = .8) + # Add line to intercept -log10(0.05).
+
+  theme(plot.title = element_text(size = 12,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = "None",
+        legend.background = element_rect(fill = "transparent",
+                                         size = 0.5, 
+                                         linetype = 3, 
+                                         colour ="transparent"),
+        legend.title = element_blank())
+
+p2 <- ggplot(TE_Table_individual_GSEA[TE_Table_individual_GSEA$subfamily %in% topPathwaysDown,], aes(x=reorder(subfamily, -log2FoldChange, FUN = median), y=log2FoldChange)) +
+  geom_jitter(aes(color = Group, size = Group), alpha = 0.2, width = .15) +
+  #scale_x_discrete(limits = topPathwaysUp) +
+  scale_color_manual(values = c("Up" = "red", "Down" = "blue", "NS" = "gray")) +
+  scale_size_manual(values = c("Up" = 1.5, "Down" = 1.5, "NS" = .5)) +
+  # geom_violin(alpha = 0.2,
+  #             trim = F) +
+  stat_summary(fun = "median", 
+               fun.min = "median", 
+               fun.max= "median", 
+               size= 0.6,
+               color = "black", 
+               geom = "crossbar",
+               width = 0.5) +
+  # geom_boxplot(aes(fill = Group),
+  #              position = position_dodge(width = .7),
+  #              width = 0.5,
+  #              alpha = .1,
+  #              outlier.shape = NA) +
+  labs(title = "Top-20 downregulated TE subfamilies", 
+       y = "log2FoldChange", 
+       x = "") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 0.8))) + # Over-ride aesthetics for figure legend.
+  geom_hline(yintercept = 0, colour = "red", linetype = 3, lwd = .8) + # Add line to intercept -log10(0.05).
+
+  theme(plot.title = element_text(size = 12,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = c(0.9,1.1),
+        legend.background = element_rect(fill = "transparent",
+                                         size = 0.5, 
+                                         linetype = 3, 
+                                         colour ="transparent"),
+        legend.title = element_blank())
+
+p <- cowplot::plot_grid(p1, p2)
+title <- cowplot::ggdraw() + cowplot::draw_label("Log2 fold changes for individual TEs in primed vs. naive hESCs", fontface='bold', size = 14)
+cowplot::plot_grid(title, p, ncol=1, rel_heights=c(0.1, 1)) # rel_heights values control title margins
+```
+```{r, fig.width=12}
+p1 <- ggplot(TE_Table_individual_GSEA[TE_Table_individual_GSEA$subfamily %in% topPathwaysUp,], aes(x=reorder(subfamily, -log2FoldChange, FUN = median), y=log2FoldChange)) +
+  geom_jitter(aes(color = Group, size = Group), alpha = 0.2, width = .15) +
+  scale_color_manual(values = c("Up" = "#0072B2", "Down" = "#D55E00", "NS" = "gray")) + # Updated colors
+  scale_size_manual(values = c("Up" = 1.5, "Down" = 1.5, "NS" = .5)) +
+  stat_summary(fun = "median", 
+               fun.min = "median", 
+               fun.max = "median", 
+               size = 0.6,
+               color = "black", 
+               geom = "crossbar",
+               width = .5) +
+  labs(title = "Top-20 upregulated TE subfamilies", 
+       y = "log2FoldChange", 
+       x = "") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 0.8))) +
+  geom_hline(yintercept = 0, colour = "red", linetype = 3, lwd = .8) +
+  theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5, lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10, angle = 45, colour = 'black', hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10, colour = "black"),
+        legend.position = "None",
+        legend.background = element_rect(fill = "transparent", size = 0.5, linetype = 3, colour ="transparent"),
+        legend.title = element_blank())
+
+p2 <- ggplot(TE_Table_individual_GSEA[TE_Table_individual_GSEA$subfamily %in% topPathwaysDown,], aes(x=reorder(subfamily, -log2FoldChange, FUN = median), y=log2FoldChange)) +
+  geom_jitter(aes(color = Group, size = Group), alpha = 0.2, width = .15) +
+  scale_color_manual(values = c("Up" = "#0072B2", "Down" = "#D55E00", "NS" = "gray")) + # Updated colors
+  scale_size_manual(values = c("Up" = 1.5, "Down" = 1.5, "NS" = .5)) +
+  stat_summary(fun = "median", 
+               fun.min = "median", 
+               fun.max = "median", 
+               size = 0.6,
+               color = "black", 
+               geom = "crossbar",
+               width = 0.5) +
+  labs(title = "Top-20 downregulated TE subfamilies", 
+       y = "log2FoldChange", 
+       x = "") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 0.8))) +
+  geom_hline(yintercept = 0, colour = "red", linetype = 3, lwd = .8) +
+  theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5, lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10, angle = 45, colour = 'black', hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10, colour = "black"),
+        legend.position = c(0.9, 1.1),
+        legend.background = element_rect(fill = "transparent", size = 0.5, linetype = 3, colour ="transparent"),
+        legend.title = element_blank())
+
+# p <- cowplot::plot_grid(p1, p2)
+# title <- cowplot::ggdraw() + cowplot::draw_label("Log2 fold changes for individual TEs in primed vs. naive hESCs", fontface = 'bold', size = 14)
+# cowplot::plot_grid(title, p, ncol = 1, rel_heights = c(0.1, 1)) # rel_heights values control title margins
+
+p <- cowplot::plot_grid(p1, p2, labels = c("A", "B"), label_fontfamily = "Times", label_size = 20, label_y = 1.02)
+title <- cowplot::ggdraw() + cowplot::draw_label("Log2 fold changes for individual TEs in primed vs. naive hESCs", fontface = 'bold', size = 14)
+combined_plot <- cowplot::plot_grid(title, p, ncol = 1, rel_heights = c(0.1, 1)) # rel_heights values control title margins
+
+# Display the combined plot
+combined_plot
+```
+```{r, fig.width=12}
+# Ensure the correct factor order for 'Group' to handle legend and color order
+TE_Table_individual_GSEA$Group <- factor(TE_Table_individual_GSEA$Group, levels = c("Up", "NS", "Down"))
+
+# First plot: Top-20 upregulated TE subfamilies
+p1 <- ggplot(TE_Table_individual_GSEA[TE_Table_individual_GSEA$subfamily %in% topPathwaysUp,], 
+             aes(x = reorder(subfamily, -log2FoldChange, FUN = median), y = log2FoldChange)) +
+  geom_jitter(aes(color = Group, size = Group), alpha = 0.2, width = .15) +
+  scale_color_manual(values = c("Down" = "#D55E00", "NS" = "gray", "Up" = "#0072B2")) +
+  scale_size_manual(values = c("Down" = 1.5, "NS" = .5, "Up" = 1.5)) +
+  stat_summary(fun = "median", fun.min = "median", fun.max = "median", size = 0.6, color = "black", geom = "crossbar", width = .5) +
+  labs(title = "Top-20 TE subfamilies upregulated in naive hESCs", y = "log2FoldChange", x = "") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 0.8))) + 
+  geom_hline(yintercept = 0, colour = "red", linetype = 3, lwd = .8) +
+  theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5, lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10, angle = 45, colour = 'black', hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10, colour = "black"),
+        legend.position = "None",
+        legend.background = element_rect(fill = "transparent", size = 0.5, linetype = 3, colour ="transparent"),
+        legend.title = element_blank())
+
+# Second plot: Top-20 downregulated TE subfamilies
+p2 <- ggplot(TE_Table_individual_GSEA[TE_Table_individual_GSEA$subfamily %in% topPathwaysDown,], 
+             aes(x = reorder(subfamily, -log2FoldChange, FUN = median), y = log2FoldChange)) +
+  geom_jitter(aes(color = Group, size = Group), alpha = 0.2, width = .15) +
+  scale_color_manual(values = c("Down" = "#D55E00", "NS" = "gray", "Up" = "#0072B2")) +
+  scale_size_manual(values = c("Down" = 1.5, "NS" = .5, "Up" = 1.5)) +
+  stat_summary(fun = "median", fun.min = "median", fun.max = "median", size = 0.6, color = "black", geom = "crossbar", width = 0.5) +
+  labs(title = "Top-20 TE subfamilies upregulated in primed hESCs", y = "log2FoldChange", x = "") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 0.8))) + 
+  geom_hline(yintercept = 0, colour = "red", linetype = 3, lwd = .8) +
+  theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5, lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10, angle = 45, colour = 'black', hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10, colour = "black"),
+        legend.position = c(0.9, 0.9),
+        legend.background = element_rect(fill = "transparent", size = 0.5, linetype = 3, colour ="black"),
+        legend.title = element_blank())
+
+p <- cowplot::plot_grid(p1, p2, labels = c("A", "B"), label_fontfamily = "Times", label_size = 20, label_y = 1.025)
+title <- cowplot::ggdraw() + cowplot::draw_label("Log2 fold changes for individual TEs in primed vs. naive hESCs", fontface = 'bold', size = 14)
+combined_plot <- cowplot::plot_grid(title, p, ncol = 1, rel_heights = c(0.1, 1)) # rel_heights values control title margins
+
+# Display the combined plot
+combined_plot
+```
+
+```{r}
+OrderPosNES <- TE_Table_individual_GSEA[TE_Table_individual_GSEA$subfamily %in% topPathwaysUp,] %>% 
+  group_by(subfamily) %>% 
+  summarise(median = median(log2FoldChange, na.rm = TRUE)) %>%
+  arrange(-median) %>%
+  dplyr::pull(subfamily)
+  
+OrderNegNES <- TE_Table_individual_GSEA[TE_Table_individual_GSEA$subfamily %in% topPathwaysDown,] %>% group_by(subfamily) %>% 
+  summarise(median = median(log2FoldChange, na.rm = TRUE)) %>%
+  arrange(-median) %>%
+  pull(subfamily)
+
+topPathwaysOrderedLog2FC <- c(OrderPosNES, OrderNegNES)
+topPathwaysOrderedLog2FC
+
+```
+
+## Gene set enrichment analysis with absolute values for Wald Statistics {.tabset .tabset-pills}
+### Creating ranked list of TEs with absolute values of Wald Statistics
+Some TE subfamilies, seem to show a dispersion of stats at the - and + extremes of the geneset, with ranks in the middle being depleted. To test which families are more perturbed globally, we can recalculate the GSEA using absolute values for the Wald Statistics.
+```{r}
+RNK_Abs_NaiveVsPrimed_TEs <- data.table(Gene_Name = rownames(TE_Table_individual), stat = abs(TE_Table_individual$stat)) #These are 2 columns from our deseq2 output that we need for GSEA
+RNK_Abs_NaiveVsPrimed_TEs <- subset(RNK_Abs_NaiveVsPrimed_TEs, stat != "NA")
+
+# Let's write this table.
+#write.table(RNK_Abs_NaiveVsPrimed_TEs, "~/Data/H9hESCs/analysis/results/subfamiliesTEs/RNK_Abs_NaiveVsPrimed_TEs.rnk",quote=F,sep="\t", row.names = F)
+```
+We can visualize the TE loci with the most positive or negative statistics.
+```{r}
+head(RNK_Abs_NaiveVsPrimed_TEs[order(RNK_Abs_NaiveVsPrimed_TEs$stat, decreasing = TRUE), ])
+```
+```{r}
+head(RNK_Abs_NaiveVsPrimed_TEs[order(RNK_Abs_NaiveVsPrimed_TEs$stat, decreasing = FALSE), ])
+```
+### Performing geneset enrichment analysis with absolute values for TE Rank
+Now, run the fgsea algorithm with 10000 permutations, using the **geneset created with all TEs with detectable reads**.
+```{r}
+RNK_Abs_NaiveVsPrimed_TEs_deframed <- deframe(RNK_Abs_NaiveVsPrimed_TEs)
+
+fgseaResAll_abs <- fgseaMultilevel(
+  pathways=DEA_TE_geneset,
+  stats=RNK_Abs_NaiveVsPrimed_TEs_deframed, 
+  eps = 0.0,
+  nPermSimple = 10000,
+  minSize = 15,
+  maxSize = Inf, 
+  scoreType = "pos")
+
+fgseaResAll_abs
+```
+Let's visualize the table with the GSEA.
+```{r}
+fgseaResTidy_abs <- fgseaResAll_abs %>%
+  as_tibble() %>%
+  arrange(desc(NES))
+
+fgseaResTidy_abs %>% 
+  dplyr::select(-leadingEdge, -ES) %>% 
+  arrange(padj) %>% 
+  DT::datatable()
+```
+Plot the normalized enrichment scores. Color the bar indicating whether or not the TE subfamily is significantly up or downregulated.
+```{r, fig.width=8, fig.height=7}
+fgseaResTidyAbsSorted <- fgseaResTidy_abs[order(fgseaResTidy_abs$padj),]
+
+ggplot(fgseaResTidyAbsSorted[c(1:30),], 
+       aes(reorder(pathway, NES), NES)) +
+  geom_col(aes(fill=padj<0.05)) +
+  coord_flip() +
+  labs(x="Pathway", y="Normalized Enrichment Score",
+       title="GSEA with TE subfamilies for absolute values of Wald Statistics - Naive Vs. Primed") + 
+  theme_minimal()
+```
+And we can now plot enrichment plots for specific subfamilies.
+```{r, fig.height=3,fig.width=6}
+plotEnrichment(pathway = DEA_TE_geneset[["HERVH-int"]], 
+               stats = RNK_Abs_NaiveVsPrimed_TEs_deframed,
+               ticksSize = 0.1) + 
+  labs(title="HERVH-int subfamily")
+```
+We can also make a table plot to explore the top pathways.
+```{r, fig.width=10, fig.height=10}
+topPathwaysUp_abs <- fgseaResAll_abs[ES > 0][head(order(pval), n=20), pathway]
+topPathwaysDown_abs <- fgseaResAll_abs[ES < 0][head(order(pval), n=20), pathway] # In this case, this should be empty!
+topPathways_abs <- c(topPathwaysUp, rev(topPathwaysDown))
+
+GSEATable_abs <- plotGseaTable(pathways = DEA_TE_geneset[topPathways_abs], 
+                           stats = RNK_Abs_NaiveVsPrimed_TEs_deframed, 
+                           fgseaRes = fgseaResAll_abs, 
+                           gseaParam=0.5,
+                           render = FALSE)
+```
+```{r, fig.width=10, fig.height=10}
+as_ggplot(GSEATable_abs)
+```
+In addition, we can choose specific pathways to visualize their enrichment profiles.
+```{r, fig.width=10}
+selectedPathways <- c("SVA_D", "SVA_F", "HERK_Int", "LTR5_Hs",
+                      "HERVH-int", "L1MEf", "LTR7")
+
+GSEATable_abs <- plotGseaTable(pathways = DEA_TE_geneset[selectedPathways], 
+                           stats = RNK_Abs_NaiveVsPrimed_TEs_deframed, 
+                           fgseaRes = fgseaResAll_abs, 
+                           gseaParam=0.5,
+                           render = FALSE)
+```
+```{r, fig.width=10}
+as_ggplot(GSEATable_abs)
+```
+### Log2FoldChanges of TE subfamilies with highest NES
+We can visualize the log2FoldChange of the individual loci of the identified subfamilies.
+```{r}
+TE_Table_individual_GSEA_abs <- TE_Table_individual %>% 
+  mutate(GSEA = case_when(
+    (TE_Table_individual$subfamily %in% fgseaResAll_abs[ES > 0]$pathway) ~ "NES>0",
+    (TE_Table_individual$subfamily %in% fgseaResAll_abs[ES < 0]$pathway) ~ "NES<0",
+    TRUE ~ "NS")) 
+```
+We want to organize the selected subfamilies by the median log2FoldChange. We can get the median values, using the following code:
+```{r}
+TE_Table_individual_GSEA_abs[TE_Table_individual_GSEA_abs$subfamily %in% topPathwaysUp_abs,] %>%
+  group_by(subfamily) %>%
+  summarize(median = median(as.numeric(log2FoldChange), na.rm = T)) %>%
+  arrange(-median)
+```
+```{r, fig.width=12}
+p1 <- ggplot(TE_Table_individual_GSEA_abs[TE_Table_individual_GSEA_abs$subfamily %in% topPathwaysUp_abs,], aes(x=reorder(subfamily, -log2FoldChange, FUN = median), y=log2FoldChange, color = Group)) +
+  geom_point(position = position_jitterdodge(jitter.width = .2, jitter.height = 0.5, dodge.width = .7), 
+             size = .3, 
+             alpha = 0.5) +
+  scale_color_manual(values = c("Up" = "red", "Down" = "blue", "NS" = "black")) +
+  # geom_violin(alpha = 0.2, 
+  #             trim = F, 
+  #             size = .3) +
+  # geom_boxplot(aes(fill = Group),
+  #              position = position_dodge(width = .7),
+  #              width = 0.5,
+  #              alpha = .1,
+  #              outlier.shape = NA) +
+  labs(title = "Top 20 differentially expressed TE subfamilies", 
+       y = "log2FoldChange", 
+       x = "") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 0.8))) + # Over-ride aesthetics for figure legend.
+  geom_hline(yintercept = 0, colour = "red", linetype = 2, lwd = .6) + # Add line to intercept -log10(0.05).
+  theme(plot.title = element_text(size = 12,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = c(0.95, 0.9),
+        legend.background = element_rect(fill = "transparent",
+                                         size = 0.5, 
+                                         linetype = 3, 
+                                         colour ="transparent"),
+        legend.title = element_blank())
+
+p <- cowplot::plot_grid(p1)
+title <- cowplot::ggdraw() + cowplot::draw_label("Log2 fold changes for individual TEs in Naive vs. Primed hESCs", fontface='bold', size = 14)
+cowplot::plot_grid(title, p, ncol=1, rel_heights=c(0.1, 1)) # rel_heights values control title margins
+```
+## Controlling for influence of read count on NES (from GSEA) {.tabset .tabset-pills}
+To understand if some subclasses are over-represented in the GSEA analysis, namely, if there is a relationship between abundance of reads per subfamily, let's plot a few graphs.
+
+### Controlling at the subfamily level
+```{r}
+TE_Table_subfamilies_GSEA_abs <- TE_Table_individual_GSEA_abs %>%
+  na.omit %>%
+  group_by(subfamily) %>%
+  summarize(medianBaseMean = median(as.numeric(baseMean), na.rm = T)) %>%
+  left_join(fgseaResAll_abs, by = c("subfamily" = "pathway")) %>%
+  dplyr::select(subfamily, medianBaseMean, NES, size) %>%
+  arrange(-NES)
+
+DT::datatable(TE_Table_subfamilies_GSEA_abs)
+```
+```{r}
+p <- ggplot(TE_Table_subfamilies_GSEA_abs, aes(x = log2(size), y = NES)) +
+  theme_bw() +
+  geom_point(alpha = .4,
+             size = 2.5,
+             na.rm = TRUE) +
+  geom_smooth(method="auto",
+              se=TRUE,
+              fullrange=FALSE,
+              level=0.95,
+              na.rm = TRUE) +
+  stat_smooth(method = "auto",
+        col = "#C42126",
+        se = FALSE,
+        size = 1,
+        na.rm = TRUE) +
+  geom_rug() +
+  ggtitle("Relationship Between TE Set Size and NES") +
+  xlab("log2 of TE Set Size") + 
+  ylab("Normalized Enrichment Score (NES)") +
+  #scale_y_continuous(limits = c(-10, 10)) +
+  #scale_x_continuous(limits = c(-10, 10)) +
+  theme(legend.position = "bottom",
+        legend.background = element_rect(fill = "white",
+                                         size = 0.5, 
+                                         linetype = 3, 
+                                         colour ="black"),
+        legend.title = element_blank(),
+        plot.title = element_text(face = "bold", size = 14, hjust = 0.5, vjust = -0.5),
+        axis.title = element_text(size = 12)) # Add several theme features.
+
+scatter_TEsize_NES <- ggExtra::ggMarginal(p, type = "density", fill = "gray", color = "black", alpha = 0.5, size = 8)
+
+scatter_TEsize_NES
+```
+
+```{r}
+p2 <- ggplot(TE_Table_subfamilies_GSEA_abs, aes(x = log2(medianBaseMean), y = NES)) +
+  theme_bw() +
+  geom_point(alpha = .4,
+             size = 2.5,
+             na.rm = TRUE) +
+  geom_smooth(method="auto",
+              se=TRUE,
+              fullrange=FALSE,
+              level=0.95,
+              na.rm = TRUE) +
+  stat_smooth(method = "auto",
+        col = "#C42126",
+        se = FALSE,
+        size = 1,
+        na.rm = TRUE) +
+  geom_rug() +
+  ggtitle("Relationship Between Basemean Expression and NES") +
+  xlab("log2 of Median Basemean Expression") + 
+  ylab("Normalized Enrichment Score (NES)") +
+  #scale_y_continuous(limits = c(-10, 10)) +
+  #scale_x_continuous(limits = c(-10, 10)) +
+  theme(legend.position = "bottom",
+        legend.background = element_rect(fill = "white",
+                                         size = 0.5, 
+                                         linetype = 3, 
+                                         colour ="black"),
+        legend.title = element_blank(),
+        plot.title = element_text(face = "bold", size = 14, hjust = 0.5, vjust = -0.5),
+        axis.title = element_text(size = 12))
+
+scatter_basemean_NES <- ggExtra::ggMarginal(p2, type = "density", fill = "gray", color = "black", alpha = 0.5, size = 8)
+
+scatter_basemean_NES
+```
+
+```{r}
+p3 <- ggplot(TE_Table_subfamilies_GSEA_abs, aes(x = log2(size), y = log2(medianBaseMean))) +
+  theme_bw() +
+  geom_point(alpha = .4,
+             size = 2.5,
+             na.rm = TRUE) +
+  geom_smooth(method="auto",
+              se=TRUE,
+              fullrange=FALSE,
+              level=0.95,
+              na.rm = TRUE) +
+  stat_smooth(method = "auto",
+        col = "#C42126",
+        se = FALSE,
+        size = 1,
+        na.rm = TRUE) +
+  geom_rug() +
+  ggtitle("Relationship Between TE Set Size and Basemean Expression") +
+  xlab("log2 of TE Set Size") + 
+  ylab("log2 of Median Basemean Expression") +
+  #scale_y_continuous(limits = c(-10, 10)) +
+  #scale_x_continuous(limits = c(-10, 10)) +
+  theme(legend.position = "bottom",
+        legend.background = element_rect(fill = "white",
+                                         size = 0.5, 
+                                         linetype = 3, 
+                                         colour ="black"),
+        legend.title = element_blank(),
+        plot.title = element_text(face = "bold", size = 14, hjust = 0.5, vjust = -0.5),
+        axis.title = element_text(size = 12))
+
+scatter_TESize_basemean <- ggExtra::ggMarginal(p3, type = "density", fill = "gray", color = "black", alpha = 0.5, size = 8)
+
+scatter_TESize_basemean
+```
+```{r, fig.height=10, fig.width=7}
+panel_scatter_plot <- ggarrange(
+  scatter_TEsize_NES, 
+  scatter_TESize_basemean, 
+  scatter_basemean_NES, 
+  ncol = 1, nrow = 3,  # Vertical arrangement
+  labels = c("A", "B", "C"),  # Labels for the plots
+  font.label = list(family = "Times", size = 20, face = "plain"),  # Font style for the labels
+  label.x = 0.001,  # Horizontal position for labels
+  label.y = 1.02,  # Higher vertical position for labels
+  hjust = -0.2,  # Adjust horizontal alignment
+  vjust = 1.5  # Adjust vertical alignment
+)
+
+panel_scatter_plot
+```
+
+### Controlling at the individual TE level (per subfamily)
+We can have a similar look at the basemeans, but instead of the median basemean of the subfamily, we can look at the basemean expression of each individual TE, of all TE subclasses. For this, we create a table with the basemean expression of the individual TEs, and fuse it with the GSEA table for TEs.
+```{r, fig.width=12}
+TE_Table_individual_GSEA_abs <- TE_Table_loci %>% 
+  mutate(V1 = V1 %>% str_replace("TE_", "")) %>%
+  left_join(indTEAnnot, by = c("V1" =  "individualRepeat")) %>%
+  # mutate(Group = case_when(
+  #   (TE_Table_loci$log2FoldChange > 1) & (TE_Table_loci$padj < 0.05) ~ "Up",
+  #   (TE_Table_loci$log2FoldChange < -1) & (TE_Table_loci$padj < 0.05) ~ "Down",
+  #   TRUE ~ "NS")) %>%
+  left_join(fgseaResAll_abs, by = c("subfamily" = "pathway")) %>%
+  # remove_rownames %>%
+  # column_to_rownames(var="V1") 
+  dplyr::select(TE = V1, baseMean, subfamily, NES, genesetSize = size.y) %>% 
+  group_by(subfamily) %>%
+  mutate(medianBaseMean = median(as.numeric(baseMean), na.rm = T))  %>%
+  na.omit() %>%
+  arrange(-baseMean)
+
+TE_Table_individual_GSEA_abs
+```
+
+```{r}
+p <- ggplot(TE_Table_individual_GSEA_abs, aes(x = log2(genesetSize), y = NES)) +
+  theme_bw() +
+  geom_point(shape = 1, 
+             alpha = .8,
+             na.rm = TRUE) +
+  geom_smooth(method="auto",
+              se=TRUE,
+              fullrange=FALSE,
+              level=0.95,
+              na.rm = TRUE) +
+  stat_smooth(method = "auto",
+        col = "#C42126",
+        se = FALSE,
+        size = 1,
+        na.rm = TRUE) +
+  geom_rug() +
+  ggtitle("Scatterplot of gene set size and NES") +
+  xlab("log2 of gene set size") + 
+  ylab("NES") +
+  #scale_y_continuous(limits = c(-10, 10)) +
+  #scale_x_continuous(limits = c(-10, 10)) +
+  theme(legend.position = "bottom",
+        legend.background = element_rect(fill = "white",
+                                         size = 0.5, 
+                                         linetype = 3, 
+                                         colour ="black"),
+        legend.title = element_blank(),
+        plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+        axis.title = element_text(size = 12)) # Add several theme features.
+
+ggExtra::ggMarginal(p)
+```
+```{r}
+p <- ggplot(TE_Table_individual_GSEA_abs, aes(x = log2(baseMean), y = NES)) +
+  theme_bw() +
+  geom_point(shape = 1, 
+             alpha = .8,
+             na.rm = TRUE) +
+  geom_smooth(method="auto",
+              se=TRUE,
+              fullrange=FALSE,
+              level=0.95,
+              na.rm = TRUE) +
+  stat_smooth(method = "auto",
+        col = "#C42126",
+        se = FALSE,
+        size = 1,
+        na.rm = TRUE) +
+  geom_rug() +
+  # geom_text(aes(x = 2, y = 20, label = lm_eqn_corr_pval(TE_Table_individual_GSEA, y = "NES", x = "genesetSize")), parse = TRUE, data.frame()) +
+  ggtitle("Scatterplot of basemean expression\nof individual TEs vs. NES of respective subfamilies") +
+  xlab("log2 of median basemean expression of TE subfamilies") + 
+  ylab("NES") +
+  #scale_y_continuous(limits = c(-10, 10)) +
+  #scale_x_continuous(limits = c(-10, 10)) +
+  theme(legend.position = "bottom",
+        legend.background = element_rect(fill = "white",
+                                         size = 0.5, 
+                                         linetype = 3, 
+                                         colour ="black"),
+        legend.title = element_blank(),
+        plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+        axis.title = element_text(size = 12)) # Add several theme features.
+
+ggExtra::ggMarginal(p)
+```
+### Check correlation betweed DEA statistics and basemean of individual TEs
+```{r, fig.width=12}
+TE_Table_individual_DEA_GSEA_abs <- TE_Table_loci %>% 
+  mutate(V1 = V1 %>% str_replace("TE_", "")) %>%
+  left_join(indTEAnnot, by = c("V1" =  "individualRepeat")) %>%
+  # mutate(Group = case_when(
+  #   (TE_Table_loci$log2FoldChange > 1) & (TE_Table_loci$padj < 0.05) ~ "Up",
+  #   (TE_Table_loci$log2FoldChange < -1) & (TE_Table_loci$padj < 0.05) ~ "Down",
+  #   TRUE ~ "NS")) %>%
+  left_join(fgseaResAll_abs, by = c("subfamily" = "pathway"))
+
+TE_Table_individual_DEA_GSEA_abs
+```
+```{r}
+
+lm_eqn_regression <- function(df, y, x){
+  m <- lm(y ~ x, data = df);
+  if (unname(coef(m)[2]) >= 0) {
+    eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2,
+                     list(a = format(unname(coef(m)[1]), digits = 4),
+                          b = format(unname(coef(m)[2]), digits = 4),
+                          r2 = format(summary(m)$r.squared, digits = 4)))
+  } else {
+    eq <- substitute(italic(y) == a - b %.% italic(x)*","~~italic(r)^2~"="~r2,
+                     list(a = format(unname(coef(m)[1]), digits = 4),
+                          b = format(abs(unname(coef(m)[2])), digits = 4),
+                          r2 = format(summary(m)$r.squared, digits = 4)))
+  }
+  as.character(as.expression(eq));
+}
+
+lm_eqn_corr_pval <- function(df, y, x){
+  m <- lm(y ~ x, data = df);
+  # formating the values into a summary string to print out
+  # ~ give some space, but equal size and comma need to be quoted
+  eq <- substitute(italic(hat(r))~"="~rvalue*","~italic(p)~"="~pvalue, 
+                   list(rvalue = sprintf("%.2f",sign(coef(m)[2])*sqrt(summary(m)$r.squared)), 
+                        pvalue = format(summary(m)$coefficients[2,4], digits = 2))) 
+  as.character(as.expression(eq));                 
+}
+
+p <- ggplot(TE_Table_individual_DEA_GSEA_abs, aes(x = log10(baseMean), y = abs(stat))) +
+  theme_bw() +
+  geom_point(shape = 1, 
+             alpha = .8,
+             na.rm = TRUE) +
+  geom_smooth(method="lm",
+              se=TRUE,
+              fullrange=FALSE,
+              level=0.95,
+              na.rm = TRUE) +
+  stat_smooth(method = "lm",
+        col = "#C42126",
+        se = FALSE,
+        size = 1,
+        na.rm = TRUE) +
+  geom_rug() +
+  geom_text(aes(x = 2, y = 60, label = lm_eqn_regression(TE_Table_individual_DEA_GSEA_abs, y = abs(TE_Table_individual_DEA_GSEA_abs$stat), x = log2(TE_Table_individual_DEA_GSEA_abs$baseMean))), parse = TRUE, data.frame(), size = 4) +
+  ggtitle("Scatterplot of basemean expression\nof individual TEs vs. Wald Stats") +
+  xlab("log10 of median basemean expression of TE subfamilies") + 
+  ylab("Absolute Wald Statistics") +
+  #scale_y_continuous(limits = c(-10, 10)) +
+  #scale_x_continuous(limits = c(-10, 10)) +
+  theme(legend.position = "bottom",
+        legend.background = element_rect(fill = "white",
+                                         size = 0.5, 
+                                         linetype = 3, 
+                                         colour ="black"),
+        legend.title = element_blank(),
+        plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+        axis.title = element_text(size = 12)) # Add several theme features.
+
+ggExtra::ggMarginal(p)
+```

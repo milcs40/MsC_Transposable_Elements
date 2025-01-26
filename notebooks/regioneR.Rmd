@@ -1,0 +1,1057 @@
+---
+title: 'HESCs - primed Vs. Naive (and XACT WT Vs. Mutant)'
+subtitle: "Using permutations (regioneR library) to test the association of TE subfamilies with differentially expressed genes"
+author: 
+  - name: "Miguel Casanova^[Disease Transcriptomics Group, Instituto de Medicina Molecular, Faculdade de Medicina da Universidade de Lisboa]"
+    email: mcasanova@medicina.ulisboa.pt
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_notebook:
+    code_folding: hide
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/Data/H9hESCs/")
+```
+
+# {.tabset .tabset-pills}
+
+This notebook was made to perform permutation tests to assess the association between the promoter regions on differentially expressed genes and subfamilies of transposable elements. This is performed, using the [`regioneR library`](https://bioconductor.org/packages/release/bioc/vignettes/regioneR/inst/doc/regioneR.html).
+
+## Data loading {.tabset .tabset-pills}
+
+Let's start by loading the libraries we will need for the analysis.
+
+```{r, warning=FALSE, results='hide',message=FALSE}
+suppressPackageStartupMessages(library(regioneR))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(refGenome))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(tibble))
+suppressPackageStartupMessages(library(zeallot))
+suppressPackageStartupMessages(library(ggplot2))
+
+source("~/Resources/Scripts/RScripts/GTFScripts/GTF_Functions.R")
+```
+
+---
+
+### Load gene and TE GTFs and list of differentially expressed genes {.tabset .tabset-pills}
+
+#### Load gene GTF file
+We start by loading the GTF file.
+The GTF file had to be modified, in bash, with the following command:\n
+```awk -F "\t"  '{OFS="\t";if($0 !~ /^chr/){print}else{split($9,a,";");info="";for(i in a){if(a[i] ~ /"/){info=a[i]";"info}};print $1,$2,$3,$4,$5,$6,$7,$8,info}}' gencode.annotation.gtf > gencode.annotation.refGenome.gtf```
+
+We will use the `getGenePositions` function to get gene information, and we will extract the regions around the start of annotated genes (**-5kb to +1kb**). 
+```{r}
+regioen <- ensemblGenome("~/TE_Gene_interaction/regioneR/")
+read.gtf(regioen, filename="gencode.v39.chr_patch_hapl_scaff.annotation_UCSC.mod.gtf")
+
+gpe <- getGenePositions(regioen) %>%
+  dplyr::select(seqid,start,end,strand,gene_name,score) %>% 
+  mutate(start2 = if_else(strand == "+", start-10000, end-2000), 
+         end2 = if_else(strand == "+", start+2000, end+10000), 
+         start = start2,
+         end = end2) %>%
+  dplyr::select(-start2, -end2)
+
+genesUniverse <- gpe  %>%
+  filter(seqid != "chrM") %>% as.data.frame
+genesUniverse <- toGRanges(genesUniverse)
+
+#genesUniverse <- toGRanges(gpe)
+#genesUniverse <- keepSeqlevels(genesUniverse, c(paste0("chr", seq(1, 22, 1)), "chrX", "chrY"), pruning.mode = "coarse")
+```
+
+#### Load TE GTF file
+To create the TE GTF file, I'll use the `createTETable` function. This TE annotation table will then be changed to add a column with the classes/families/subfamilies to perform the permutation tests on.
+```{r}
+c(indTEAnnot, indTEAnnot_Extended, indTEAnnot_subfamilyStats) %<-% 
+  createTETable("~/TE_Gene_interaction/regioneR/UCSC_rmsk_full_table.txt", 
+                removeLowComplexity = T,
+                order = T)
+
+rmsk <- indTEAnnot %>% 
+  mutate(
+    #family = sub("\\?", "", family),
+    #toPlot = family
+    toPlot = subfamily
+    #toPlot = if_else(grepl("Alu", subfamily), subfamily, "other")
+    #toPlot = if_else(grepl("DNA", class), "DNA", if_else(grepl("LINE", class), "LINE", if_else(grepl("SINE", class), "SINE", if_else(grepl("LTR", class), class,"other")))), toPlot = if_else(toPlot == "LTR" | toPlot == "LTR/Gypsy", "other", toPlot)
+  )
+
+rmsk <- toGRanges(rmsk)
+#rmsk <- keepSeqlevels(rmsk, c(paste0("chr", seq(1, 22, 1)), "chrX", "chrY"), pruning.mode = "coarse")
+```
+#### Load differential expression information
+We finally load the differential expression analysis table, and select Up- and Down-regulated genes (converting them with `toGRanges`).
+```{r}
+DEGs <- (fread("~/TE_Gene_interaction/regioneR/DEA_Tables/DEGs_naiveVsPrimed_allGenes.tsv"))
+
+DEGs <- DEGs %>% 
+  remove_rownames %>% 
+  column_to_rownames(var="V1") %>%
+  mutate(Group = case_when(
+    (DEGs$log2FoldChange > 1) & (DEGs$padj < 0.01) ~ "Up",
+    (DEGs$log2FoldChange < -1) & (DEGs$padj < 0.01) ~ "Down",
+    TRUE ~ "NS")) %>%
+  arrange(stat)
+
+DEGs_UP <- DEGs %>% 
+  filter(Group == "Up") %>%
+  arrange(-stat)
+
+DEGs_DOWN <- DEGs %>% 
+  filter(Group == "Down")
+
+genesUp <- gpe  %>% 
+  filter(gene_name %in% rownames(DEGs_UP), seqid != "chrM") %>% 
+  as.data.frame %>%
+  toGRanges()
+genesUp <- keepSeqlevels(genesUp, c(paste0("chr", seq(1, 22, 1)), "chrX", "chrY"), pruning.mode = "coarse")
+
+genesDown <- gpe  %>% 
+  filter(gene_name %in% rownames(DEGs_DOWN), seqid != "chrM") %>% 
+  as.data.frame %>%
+  toGRanges()
+genesDown <- keepSeqlevels(genesDown, c(paste0("chr", seq(1, 22, 1)), "chrX", "chrY"), pruning.mode = "coarse")
+```
+
+### Prepare the functions to do permutation tests
+
+To perform permutation tests, a series of functions are going to be required. These functions were obtained from `Aurelie Teissandier` and have been used in [Chelmicki et al, Nature 2021](https://www.nature.com/articles/s41586-020-03135-1/figures/10).
+
+The first is **`randomSamplingGenes`**, which takes a list of genes of interest (DEGs) and the list of all annotated genes (gene universe), and provides a random sample, with size equal to the number of genes of interest, from the universe of genes.
+```{r}
+randomSamplingGenes <- function(A, universe = genes,...){
+  random <- resampleRegions(A, universe)
+  return(random)
+}
+
+#randomSamplingGenes(A = genesUp, universe = genesUniverse)
+```
+The second function is **`numOverlapsMod`**. This function takes a list of genes of interest (including the locations we want to study, i.e. -5kb/+1kb of the gene start) and a list of individual TEs (including a column with the names of the classes/families/subfamilies) that we want to test, and count the number of overlaps between the genes and a chosen list of TEs (either subfamily, family or class).
+```{r}
+numOverlapsMod <- function(A, B, col = "toPlot", ...){
+  over <- overlapRegions(A = A, B = B, colB = col, get.bases = TRUE)
+  colnames(over) <- c("chr", "startA", "endA", "startB", "endB", "dd", "type", "ov.bases")
+  tibover <- as_tibble(over) %>% 
+    dplyr::select(chr, startA, endA, dd) %>% 
+    distinct
+  tibover_table <- table(tibover$dd)
+  
+  for(name in unique(B$toPlot)){
+    if(!(name %in% names(tibover_table))){
+      tibover_table[[name]] <- NA}
+  }
+  
+  tibover_table <- tibover_table[sort(names(tibover_table))]
+  
+  return(tibover_table)
+}
+
+#numOverlapsMod(A = genesUp, B = rmsk)
+```
+The final function, **`permTestMod`**, will use the above functions, to run the permutation test, comparing the number of observed overlaps with a number of overlaps of a set of randomized genes with the TEs of interest.
+```{r}
+permTestMod <- function(A, B, TEs = B$toPlot, ntimes=1000, randomize.function = randomSamplingGenes, evaluate.function = numOverlapsMod, alternative = "greater", genes = genesUniverse){	
+
+  original.evaluate <- evaluate.function(A = A, B = B)
+  random.evaluate <- matrix(nrow = ntimes, ncol = length(original.evaluate))
+  colnames(random.evaluate) <- names(original.evaluate)
+  
+  # func <- function(i) {
+  #   Arandom <- randomize.function(A, universe = genes)
+  #   random.evaluate[i,] <- evaluate.function(A = Arandom, B = B)
+  # }
+  # t <- as.data.frame(t(sapply(1:ntimes, func)))
+
+  
+  # random.evaluate <- as.data.frame(matrix(nrow = ntimes, ncol = length(original.evaluate)))
+  # colnames(random.evaluate) <- names(original.evaluate)
+
+  print("Finish original Evaluation")
+  for(i in 1:ntimes){
+    if(i == 1){print(date())}
+    Arandom <- randomize.function(A, universe = genes)
+    if(i == 1){print(date())}
+    random.evaluate[i,] <- evaluate.function(A = Arandom, B = B)
+    # random.evaluate[i,] <- as.data.frame(rbind(evaluate.function(A = Arandom, B = B)))
+    if(i == 1){print(date())}
+    if((i %% 25) == 0){print(i)}
+  }
+
+  pval <- numeric()
+  if (alternative == "greater"){
+    for(family in unique(TEs)){
+    num.nas <- length(which(is.na(random.evaluate[, family])))
+    num.valid.values <- ntimes - num.nas
+    pval[family] <- (sum(original.evaluate[family] <= random.evaluate[, family], na.rm = TRUE) + 1)/(num.valid.values + 1)
+    }
+  } else if (alternative == "less"){
+    for(family in unique(TEs)){
+    num.nas <- length(which(is.na(random.evaluate[, family])))
+    num.valid.values <- ntimes - num.nas
+    pval[family] <- (sum(original.evaluate[family] >= random.evaluate[, family], na.rm = TRUE) + 1)/(num.valid.values + 1)
+    }
+  }
+  
+  res <- list(pval = pval, 
+              ntimes = ntimes, 
+              observed = original.evaluate, 
+              permuted = random.evaluate)
+  
+  return(res)
+}
+```
+
+---
+
+The next set of functions, will be used to plot different types of graphs to represent the permutation tests performed.
+
+`PermutationGraph` will provide a plot with the distribution of the number of randomized genes containing a given TE element in its promoter, versus the observed number of genes containing that TE element in their promoter. The function takes an object from the `permTestMod` (`test`) function, and the TE element to plot for (`group`).
+```{r}
+PermutationGraph <- function(test, group) {
+  
+  randomOverlap <- data.frame(test$permuted)
+  observedOverlap <- test$observed[group]
+  quant0.05 <- quantile(randomOverlap[, group], 0.05, na.rm = T)
+  quant0.95 <- quantile(randomOverlap[, group], 0.95, na.rm = T)
+  mean <-  mean(randomOverlap[, group], na.rm = T)
+  sd <- sd(randomOverlap[, group], na.rm = T)
+  max <- max(randomOverlap[, group], na.rm = T)
+  min <- min(randomOverlap[, group], na.rm = T)
+  
+  ggplot(randomOverlap, aes_string(x = group)) +
+    theme_bw() +
+    geom_histogram(aes(y = ..density..), bins = 50, color = "black", lwd = 0.2, fill = "gray", alpha = .3) +
+    stat_function(fun = dnorm, args = list(mean, sd), geom = "line", linetype = "dashed", lwd = 0.5, na.rm = T) + 
+    stat_function(fun = dnorm, args = list(mean, sd), geom = "area", alpha = 0.08, fill = "red", xlim = c(quant0.05, quant0.95)) +
+    stat_function(fun = dnorm, args = list(mean, sd), geom = "area", fill = "firebrick", alpha = 0.7, xlim = c(quant0.95, max)) +
+    stat_function(fun = dnorm, args = list(mean, sd), geom = "area", fill = "firebrick", alpha = 0.7, xlim = c(min, quant0.05)) +
+    geom_segment(aes(x = mean, xend = mean, y = 0, yend =  max(dnorm(randomOverlap[, group], mean, sd), na.rm = T)), linetype = 2, lwd = .35, colour = "black") +
+    geom_segment(aes(x = observedOverlap, xend = observedOverlap, y = 0, yend =  max(dnorm(randomOverlap[, group], mean, sd), na.rm = T)), linetype = 2, lwd = .4, colour = "blue") +
+    theme(plot.title=element_text(size=14, face="bold", hjust=0.5)) +
+    labs(title = paste0("Simulated Overlaps of Random Genes\nwith the ", group,  " subfamily (", length(randomOverlap[, group]), " permutations)"),
+         x = "Number of associated genes",
+         y = "Frequency")
+}
+```
+The next function will plot a graph of the permutation test, plotting the number of observed genes showing overlap with a given TE and the mean and SD of the number of genes showing overlap in a set of permutations/randomizations. The function takes the object from the `permTestMod` (`test`) function, a list of TE subfamily/family/class names (`TEs`), whether the genes are up or down-regulated (`typeGenes`), a title (`title`) and a position coordinates for the legend (`legendPos`).
+```{r}
+TEDistGraph <- function(test, TEs, typeGenes, title, legendPos = c(0.9,0.935)){
+  
+  annotationobserved <- tibble(family = names(test$observed), 
+                               number = as.numeric(test$observed), 
+                               type = typeGenes, 
+                               sd = NA)
+  
+  annotationrandom <- as_tibble(test$permuted) %>% 
+    mutate(sample = rownames(as.data.frame(test$permuted))) %>% 
+    gather(key = "family", value = "number", -sample) %>% 
+    group_by(family) %>%
+    summarise(sd = sd(number), number = mean(number)) %>%
+    mutate(type = "Random genes") %>%
+    dplyr::select(family, number, type, sd)
+  
+  annotation <- bind_rows(annotationobserved, annotationrandom)
+  
+  annotation <- annotation %>%
+    filter(family %in% TEs)
+  
+  annotation$type <- factor(annotation$type, levels = c(typeGenes,"Random genes"))
+  
+  pval <- tibble(family=names(test$pval), pval=test$pval) %>% 
+    full_join(annotation) %>% 
+    mutate(number = if_else(is.na(sd), number, number+sd)) %>% 
+    dplyr::select(-type,-sd) %>% 
+    group_by(family) %>%
+    top_n(1, number)
+  
+  ggplot(data = annotation, aes(x = family)) + 
+    geom_col(aes(y = number, fill = type), position="dodge") +
+    scale_fill_manual(values = c( "orangered", "gray29")) +
+    geom_errorbar(aes(ymax = number + sd, ymin = number - sd, group = type), position = position_dodge(width=0.9), width = 0.25) +
+    geom_text(data = pval, aes(y = number + (max(annotation$number, na.rm = T)/20), label = if_else(pval < 0.001, paste0("<",round(pval, 4)), paste0(round(pval, 4))), color = if_else(pval<0.05, "red", "black")), angle = 45) +
+    scale_color_manual(values = c("black", "red"), guide = "none") +
+    labs(title = title, 
+       y = "Number of Genes", 
+       x = "") +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16,
+                                    face = "bold",
+                                    hjust = 0.5,
+                                    lineheight = 1.2),
+          plot.caption = element_text(size = 12),
+          axis.text.x = element_text(size = 10,
+                                     angle = 45,
+                                     colour = 'black',
+                                     hjust = 1),
+          axis.title.y = element_text(size = 12),
+          axis.text.y = element_text(size = 10,
+                                     colour = "black"),
+          legend.position = legendPos,
+          legend.background = element_rect(fill = "transparent",
+                                           size = 0.5,
+                                           linetype = 3,
+                                           colour ="transparent"),
+          legend.title = element_blank())
+}
+```
+The next function will plot a graph of the permutation test, plotting the number of observed genes showing overlap with a given TE and the median and 0.05 and 0.95 quantils of the number of genes showing overlap in a set of permutations/randomizations. The function takes the object from the `permTestMod` (`test`) function, a list of TE subfamily/family/class names (`TEs`), whether the genes are up or down-regulated (`typeGenes`), a title (`title`) and a position coordinates for the legend (`legendPos`).
+```{r, fig.width=12}
+TEDistGraphMedian <- function(test, TEs, typeGenes, title, legendPos = c(0.9,0.935)){
+  
+  annotationobserved <- tibble(family = names(test$observed), 
+                               median = as.numeric(test$observed), 
+                               Q05 = NA, 
+                               Q95 = NA, 
+                               type = typeGenes)
+  
+  annotationrandom <- as_tibble(test$permuted) %>%
+    gather(key = "family", value = "number") %>%
+    group_by(family) %>%
+    summarise(min = min(number), mean = mean(number), sd = sd(number), max = max(number), median = median(number), Q05 = quantile(number, 0.05, na.rm = T), Q95 = quantile(number, 0.95, na.rm = T)) %>%
+    mutate(type = "Random genes") %>%
+    dplyr::select(family, median, Q05, Q95, type)
+  
+  annotation <- bind_rows(annotationobserved, annotationrandom)
+  
+  annotation <- annotation %>%
+    filter(family %in% TEs)
+  
+  annotation$type <- factor(annotation$type, levels = c(typeGenes,"Random genes"))
+  
+  pval <- tibble(family=names(test$pval), pval=test$pval) %>% 
+    full_join(annotation) %>% 
+    mutate(median = if_else(is.na(Q95), median, median + (median - Q95))) %>% 
+    dplyr::select(-type,-Q05, -Q95) %>% 
+    group_by(family) %>%
+    top_n(1, median)
+
+  ggplot(data = annotation, aes(x = family)) +
+    geom_col(aes(y = median, fill = type), position="dodge") +
+    scale_fill_manual(values = c("orangered", "gray29")) +
+    geom_errorbar(aes(ymax = Q95, ymin = Q05, group = type), position = position_dodge(width=0.9), width = 0.25) +
+    geom_text(data = pval, aes(y = median + (max(annotation$median, na.rm = T)/15), label = if_else(pval < 0.001, paste0("<",round(pval, 4)), paste0(round(pval, 4))), color = if_else(pval<0.05, "red", "black")), angle = 45) +
+    scale_color_manual(values = c("black", "red"), guide = "none") +
+    labs(title = title,
+         y = "Number of Genes",
+         x = "") +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16,
+                                    face = "bold",
+                                    hjust = 0.5,
+                                    lineheight = 1.2),
+          plot.caption = element_text(size = 12),
+          axis.text.x = element_text(size = 10,
+                                     angle = 45,
+                                     colour = 'black',
+                                     hjust = 1),
+          axis.title.y = element_text(size = 12),
+          axis.text.y = element_text(size = 10,
+                                     colour = "black"),
+          legend.position = legendPos,
+          legend.background = element_rect(fill = "transparent",
+                                           size = 0.5,
+                                           linetype = 3,
+                                           colour ="transparent"),
+          legend.title = element_blank())
+  }
+```
+The next function will plot a graph of the permutation test, plotting the number of observed genes showing overlap with a given TE and the boxplot representing the number of overlaps in a set of permutations for random genes. The function takes the object from the `permTestMod` (`test`) function, a list of TE subfamily/family/class names (`TEs`), whether the genes are up or down-regulated (`typeGenes`), a title (`title`) and a position coordinates for the legend (`legendPos`).
+```{r, fig.width = 12}
+TEDistGraphBoxplots <- function(test, TEs, typeGenes, title, legendPos = c(0.9,0.935)){
+  
+  annotationrandom <- as_tibble(test$permuted) %>% 
+    gather(key = "family", value = "number") %>% 
+    group_by(family) %>%
+    mutate(type = "Random genes", min = min(number), max = max(number), Q05 = quantile(number, 0.05, na.rm = T), Q95 = quantile(number, 0.95, na.rm = T)) 
+
+  annotationobserved <- tibble(family = names(test$observed), 
+                             number = as.numeric(test$observed), 
+                             Q05 = NA,
+                             Q95 = NA, 
+                             type = typeGenes)
+  
+  annotation <- bind_rows(annotationobserved, annotationrandom)
+  
+  annotation <- annotation %>%
+    filter(family %in% TEs)
+  annotation$type <- factor(annotation$type, levels = c(typeGenes,"Random genes"))
+
+  annotationrandom <- annotationrandom %>%
+    filter(family %in% TEs)
+  
+  annotationobserved <- annotationobserved %>%
+    filter(family %in% TEs)
+  
+  pval <- tibble(family=names(test$pval), pval=test$pval) %>%
+    full_join(annotation) %>%
+    mutate(number = if_else(is.na(Q95), number, Q95)) %>%
+    dplyr::select(-type,-Q05, -Q95) %>%
+    group_by(family) %>%
+    top_n(1, number) %>%
+    distinct
+  
+  ggplot(data = annotationrandom, aes(x = family, y = number)) +
+    geom_boxplot(aes(fill = type),
+                 alpha = .6,
+                 outlier.size = .5) +
+    scale_fill_manual(values = c("Random genes" = "gray29")) +
+    # geom_violin(alpha = 0.2,
+    #             trim = F,
+    #             size = .3,
+    #             scale = "width") +
+    geom_point(data = annotationobserved,
+               aes(x = family, y = number, shape = type),
+               col = "black",
+               fill = "orangered",
+               size = 3) +
+    scale_shape_manual(values = c(23)) +
+    geom_text(data = pval, aes(y = number + (max(annotation$number, na.rm = T)/15), label = if_else(pval < 0.001, paste0("<",round(pval, 4)), paste0(round(pval, 4))), color = if_else(pval < 0.05, "red", "black")), angle = 45) +
+    scale_color_manual(values = c("black", "red"), guide = "none") +
+    labs(title = title,
+         y = "Number of Genes",
+         x = "") +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16,
+                                    face = "bold",
+                                    hjust = 0.5,
+                                    lineheight = 1.2),
+          plot.caption = element_text(size = 12),
+          axis.text.x = element_text(size = 10,
+                                     angle = 45,
+                                     colour = 'black',
+                                     hjust = 1),
+          axis.title.y = element_text(size = 12),
+          axis.text.y = element_text(size = 10,
+                                     colour = "black"),
+          legend.position = legendPos,
+          legend.box.background = element_rect(fill = "transparent",
+                                               size = 0.6,
+                                               linetype = "dotted",
+                                               colour ="black"),
+          legend.spacing.y = unit(0, "cm"),
+          legend.title = element_blank())
+}
+```
+Similar to above, but sorting based on the order of the vector provided as TEs.
+```{r, fig.width = 12}
+orderedTEDistGraphBoxplots <- function(test, TEs, typeGenes, title, legendPos = c(0.9,0.935)){
+  
+  annotationrandom <- as_tibble(test$permuted) %>% 
+    gather(key = "family", value = "number") %>% 
+    group_by(family) %>%
+    mutate(type = "Random genes", min = min(number), max = max(number), Q05 = quantile(number, 0.05, na.rm = T), Q95 = quantile(number, 0.95, na.rm = T)) 
+
+  annotationobserved <- tibble(family = names(test$observed), 
+                             number = as.numeric(test$observed), 
+                             Q05 = NA,
+                             Q95 = NA, 
+                             type = typeGenes)
+  
+  annotation <- bind_rows(annotationobserved, annotationrandom)
+  annotation$family <- factor(annotation$family, levels=TEs)
+  
+  annotation <- annotation %>%
+    filter(family %in% TEs)
+  annotation$type <- factor(annotation$type, levels = c(typeGenes,"Random genes"))
+
+  annotationrandom <- annotationrandom %>%
+    filter(family %in% TEs)
+  annotationrandom$family <- factor(annotationrandom$family, levels=TEs)
+
+  annotationobserved <- annotationobserved %>%
+    filter(family %in% TEs)
+  annotationobserved$family <- factor(annotationobserved$family, levels=TEs)
+
+  pval <- tibble(family=names(test$pval), pval=test$pval) %>%
+    full_join(annotation) %>%
+    mutate(number = if_else(is.na(Q95), number, Q95)) %>%
+    dplyr::select(-type,-Q05, -Q95) %>%
+    group_by(family) %>%
+    top_n(1, number) %>%
+    distinct
+  
+  ggplot(data = annotationrandom, aes(x = family, y = log2(number))) +
+    geom_boxplot(aes(fill = type),
+                 alpha = .6,
+                 outlier.size = .5) +
+    scale_fill_manual(values = c("Random genes" = "gray29")) +
+    # geom_violin(alpha = 0.2,
+    #             trim = F,
+    #             size = .3,
+    #             scale = "width") +
+    geom_point(data = annotationobserved,
+               aes(x = family, y = log2(number), shape = type),
+               col = "black",
+               fill = "orangered",
+               size = 3) +
+    scale_shape_manual(values = c(23)) +
+    geom_text(data = pval, aes(y = log2(number) + (max(log2(annotation$number), na.rm = T)/15), label = if_else(pval < 0.001, paste0("<",round(pval, 4)), paste0(round(pval, 4))), color = if_else(pval < 0.05, "red", "black")), angle = 45) +
+    scale_color_manual(values = c("black", "red"), guide = "none") +
+    labs(title = title,
+         y = "log2(Number of Genes)",
+         x = "") +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16,
+                                    face = "bold",
+                                    hjust = 0.5,
+                                    lineheight = 1.2),
+          plot.caption = element_text(size = 12),
+          axis.text.x = element_text(size = 10,
+                                     angle = 45,
+                                     colour = 'black',
+                                     hjust = 1),
+          axis.title.y = element_text(size = 12),
+          axis.text.y = element_text(size = 10,
+                                     colour = "black"),
+          legend.position = legendPos,
+          legend.box.background = element_rect(fill = "transparent",
+                                               size = 0.6,
+                                               linetype = "dotted",
+                                               colour ="black"),
+          legend.spacing.y = unit(0, "cm"),
+          legend.title = element_blank())
+}
+```
+### Perform permutation tests {.tabset .tabset-pills}
+We will next run the `permTestMod` function, to perform the permutation tests for different classes of DEGs (up- and down-regulated). For each class, an enrichment and depletion of TE subfamilies will be tested.
+
+We start by performing a permutation test, to test the enrichment of TE subfamilies in promoters of upregulated genes.
+```{r}
+test_upregulated_enrichment <- permTestMod(A = genesUp,  
+                    B = rmsk, 
+                    ntimes = 1000, 
+                    randomize.function = randomSamplingGenes, 
+                    evaluate.function = numOverlapsMod,
+                    genes = genesUniverse,
+                    alternative = "greater")
+```
+Next, we test the depletion of TE subfamilies from the promoters of upregulated genes.
+```{r}
+test_upregulated_depletion <- permTestMod(A = genesUp,  
+                    B = rmsk, 
+                    ntimes = 1000, 
+                    randomize.function = randomSamplingGenes, 
+                    evaluate.function = numOverlapsMod,
+                    genes = genesUniverse,
+                    alternative = "less")
+```
+We now move to downregulated genes. We start by checking the enrichment of subfamilies in the promoters of downregulated genes.
+```{r}
+test_downregulated_enrichment <- permTestMod(A = genesDown,  
+                    B = rmsk, 
+                    ntimes = 1000, 
+                    randomize.function = randomSamplingGenes, 
+                    evaluate.function = numOverlapsMod,
+                    genes = genesUniverse,
+                    alternative = "greater")
+```
+And finally, we test the depletion of TE subfamilies from the promoters of downregulated genes.
+```{r}
+test_downregulated_depletion <- permTestMod(A = genesDown,  
+                    B = rmsk, 
+                    ntimes = 1000, 
+                    randomize.function = randomSamplingGenes, 
+                    evaluate.function = numOverlapsMod,
+                    genes = genesUniverse,
+                    alternative = "less")
+```
+
+#### Enrichment of TE subfamilies in the promoters of upregulated genes
+We start by looking at subfamilies of TEs that are statistically enriched at the promoter regions of genes that are upregulated in naive hESCs. We can start by looking at all the subfamilies with a FDR lower than 0.01 (and with at least 1 observed gene containing a TE of that subfamily in its promoter region).
+
+```{r}
+#test_upregulated_enrichment$pval[test_upregulated_enrichment$pval < 0.01]
+
+test_upregulated_enrichment$pval[intersect(names(which(test_upregulated_enrichment$pval < 0.01)), names(which(test_upregulated_enrichment$observed > 1)))]
+
+#test_upregulated_enrichment$observed[intersect(names(which(test_upregulated_enrichment$pval < 0.01)), names(which(test_upregulated_enrichment$observed > 1)))]
+```
+Several subfamilies have a FDR of 0.000999001, which means that there are no random observations that are more extreme than the observed values. 
+```{r}
+test_upregulated_enrichment$pval[which.min(test_upregulated_enrichment$pval)]
+```
+Using the `PermutationGraph` function, we can visualize the distribution of simulated overlaps, compared with the the real overlap, for a given subfamily.
+```{r}
+perm_SVA_D <- PermutationGraph(test_upregulated_enrichment, "SVA_D")
+
+perm_SVA_D
+```
+```{r}
+perm_L1PA7 <- PermutationGraph(test_upregulated_enrichment, "L1PA7")
+
+perm_L1PA7
+```
+```{r, fig.width=12, fig.height=4}
+panel_plot_perm <- ggarrange(
+  perm_SVA_D, perm_L1PA7,        # Plots to arrange
+  labels = c("A", "B"),         # Labels for the plots
+  ncol = 2, nrow = 1,           # 1 row, 2 columns
+  font.label = list(size = 20, family = "Times", face = "bold"),  # Times font, size 20, bold
+  label.x = 0.05, label.y = 1.01  # Adjust label positions for better alignment
+)
+
+panel_plot_perm
+```
+```{r}
+PermutationGraph2 <- function(test, group) {
+  
+  randomOverlap <- data.frame(test$permuted)
+  observedOverlap <- test$observed[group]
+  quant0.05 <- quantile(randomOverlap[, group], 0.05, na.rm = T)
+  quant0.95 <- quantile(randomOverlap[, group], 0.95, na.rm = T)
+  mean <-  mean(randomOverlap[, group], na.rm = T)
+  sd <- sd(randomOverlap[, group], na.rm = T)
+  max <- max(randomOverlap[, group], na.rm = T)
+  min <- min(randomOverlap[, group], na.rm = T)
+  
+  # Calculate the y position for labels
+  y_position <- max(dnorm(randomOverlap[, group], mean, sd), na.rm = T)
+
+  ggplot(randomOverlap, aes_string(x = group)) +
+    theme_bw() +
+    geom_histogram(aes(y = ..density..), bins = 50, color = "black", lwd = 0.2, fill = "gray", alpha = .3) +
+    stat_function(fun = dnorm, args = list(mean, sd), geom = "line", linetype = "dashed", lwd = 0.5, na.rm = T) + 
+    stat_function(fun = dnorm, args = list(mean, sd), geom = "area", alpha = 0.08, fill = "red", xlim = c(quant0.05, quant0.95)) +
+    stat_function(fun = dnorm, args = list(mean, sd), geom = "area", fill = "firebrick", alpha = 0.7, xlim = c(quant0.95, max)) +
+    stat_function(fun = dnorm, args = list(mean, sd), geom = "area", fill = "firebrick", alpha = 0.7, xlim = c(min, quant0.05)) +
+    
+    # Add lines for mean of permutations and observed value
+    geom_segment(aes(x = mean, xend = mean, y = 0, yend =  y_position), linetype = 2, lwd = .35, colour = "black") +
+    geom_segment(aes(x = observedOverlap, xend = observedOverlap, y = 0, yend =  y_position), linetype = 2, lwd = .4, colour = "blue") +
+    
+    # Add bold labels for Ev_perm (mean) and Ev_obs (observed value)
+    annotate("text", x = mean, y = y_position * 1.1, 
+             label = paste("Perm\n", round(mean, 2)), color = "black", hjust = 0.5, fontface = "bold") +
+    annotate("text", x = observedOverlap, y = y_position * 1.1, 
+             label = paste("Obs\n", round(observedOverlap, 2)), color = "blue", hjust = 0.5, fontface = "bold") +
+    
+    # Adjust margins to prevent clipping (increase right margin)
+    theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+          plot.margin = margin(10, 40, 10, 10)) +  # Increase the right margin
+    labs(title = paste0("Simulated Overlaps of Random Genes\nwith the ", group,  " subfamily (", length(randomOverlap[, group]), " permutations)"),
+         x = "Number of associated genes",
+         y = "Frequency")
+}
+
+PermutationGraph2(test_upregulated_enrichment, "L1PA7")
+```
+```{r, fig.width=12, fig.height=4}
+perm_SVA_D_2 <-  PermutationGraph2(test_upregulated_enrichment, "SVA_D")
+perm_L1PA7_2 <-  PermutationGraph2(test_upregulated_enrichment, "L1PA7")
+
+panel_plot_perm_2 <- ggarrange(
+  perm_SVA_D_2, perm_L1PA7_2,        # Plots to arrange
+  labels = c("A", "B"),         # Labels for the plots
+  ncol = 2, nrow = 1,           # 1 row, 2 columns
+  font.label = list(size = 20, family = "Times", face = "bold"),  # Times font, size 20, bold
+  label.x = 0.05, label.y = 1.01  # Adjust label positions for better alignment
+)
+
+panel_plot_perm_2
+```
+
+This can also be acomplished using the `permTest` function from `regioneR` directly.
+```{r}
+pt <- permTest(A=genesUp, B=rmsk[rmsk$subfamily == "SVA_D"], randomize.function=resampleRegions, universe = genesUniverse, evaluate.function=numOverlaps, ntimes = 1000)
+
+# Adjust the plot margins and title size to avoid cutting off the top information
+par(mar = c(5, 5, 6, 2), cex.main = 1.5) # Adjust margins and title size
+
+# Plot the results
+plot(pt, 
+     main = "Permutation Test for SVA_D Subfamily",  # Add a clearer title
+     ylim = c(0, 0.08)  # Adjust y-limits if needed to display properly
+)
+
+# Reset the graphical parameters to default (optional)
+par(mar = c(5, 4, 4, 2) + 0.1)
+
+```
+
+We can now visualize the enrichment using the plot functions defined above. 
+
+**Using mean and SD for the permutations.**
+```{r, fig.width=12, message=F, warning = F, results = F}
+TEDistGraph(test = test_upregulated_enrichment, 
+            TEs = topPathways, 
+            typeGenes =  "Upregulated genes", 
+            title = "Correlation between gene upregulation and proximity to retrotransposons\n1000 permutations - Mean and Standard Deviation\n(-10 kb to +2 kb from TSS)", 
+            legendPos = c(0.93, 1.06))
+```
+**Using median and 0.05 and 0.95 quantiles for the permutations.**
+```{r, fig.width=12, message=F, warning = F, results = F}
+TEDistGraphMedian(test = test_upregulated_enrichment, 
+            TEs = topPathways, 
+            typeGenes =  "Upregulated genes", 
+            title = "Correlation between gene upregulation and proximity to retrotransposons\n1000 permutations - Median and Quantiles (5 & 95)\n(-10 kb to +2 kb from TSS)", 
+            legendPos = c(0.93, 1.06))
+```
+**Using boxplots for the permutations.**
+```{r, fig.width=12, message=F, warning = F, results = F}
+TEDistGraphBoxplots(test = test_upregulated_enrichment, 
+            TEs = topPathways, 
+            typeGenes =  "Upregulated genes", 
+            title = "Correlation between gene upregulation and proximity to retrotransposons\n1000 permutations - Boxplots\n(-10 kb to +2 kb from TSS)", 
+            legendPos = c(0.93, 1.09))
+```
+```{r, fig.width=12, message=F, warning = F, results = F}
+orderedTEDistGraphBoxplots(test = test_upregulated_enrichment, 
+            TEs = topPathwaysOrderedLog2FC, 
+            typeGenes =  "Upregulated genes", 
+            title = "Correlation between gene upregulation and TE enrichment\n-10 kb to +2 kb from gene start\n1000 permutations", 
+            legendPos = c(0.93, 1.09))
+```
+```{r}
+orderedTEDistGraphBoxplots2 <- function(test, TEs, typeGenes, title, legendPos = c(0.9,0.935)){
+
+  # Create the random and observed gene annotation
+  annotationrandom <- as_tibble(test$permuted) %>% 
+    gather(key = "family", value = "number") %>% 
+    group_by(family) %>%
+    mutate(type = "Random genes", min = min(number), max = max(number), Q05 = quantile(number, 0.05, na.rm = T), Q95 = quantile(number, 0.95, na.rm = T)) 
+
+  annotationobserved <- tibble(family = names(test$observed), 
+                               number = as.numeric(test$observed), 
+                               Q05 = NA,
+                               Q95 = NA, 
+                               type = typeGenes)
+  
+  # Merge the annotations
+  annotation <- bind_rows(annotationobserved, annotationrandom)
+  annotation$family <- factor(annotation$family, levels=TEs)
+  
+  annotation <- annotation %>%
+    filter(family %in% TEs)
+  annotation$type <- factor(annotation$type, levels = c(typeGenes,"Random genes"))
+
+  annotationrandom <- annotationrandom %>%
+    filter(family %in% TEs)
+  annotationrandom$family <- factor(annotationrandom$family, levels=TEs)
+
+  annotationobserved <- annotationobserved %>%
+    filter(family %in% TEs)
+  annotationobserved$family <- factor(annotationobserved$family, levels=TEs)
+
+  # Prepare p-values for display
+  pval <- tibble(family=names(test$pval), pval=test$pval) %>%
+    full_join(annotation, by = "family") %>%
+    mutate(number = if_else(is.na(Q95), number, Q95)) %>%
+    dplyr::select(-type,-Q05, -Q95) %>%
+    group_by(family) %>%
+    top_n(1, number) %>%
+    distinct
+
+  # Get the number of subfamilies (for the vertical line position)
+  num_subfamilies <- length(TEs)
+  split_point <- round(num_subfamilies / 2) # Split the subfamilies in half
+
+  # Define the plot with rectangles and a dynamic dashed line
+  ggplot(data = annotationrandom, aes(x = family, y = log2(number))) +
+    # Add rectangles based on split point
+    annotate("rect", xmin = 0.5, xmax = split_point + 0.5, ymin = -Inf, ymax = Inf, fill = "#0072B2", alpha = 0.05) +
+    annotate("rect", xmin = split_point + 0.5, xmax = Inf, ymin = -Inf, ymax = Inf, fill = "#D55E00", alpha = 0.05) +
+    
+    # Add a vertical dashed line at the split point
+    geom_vline(xintercept = split_point + 0.5, linetype = "dotted", color = "black", size = 0.5) +
+
+    # Add labels for Naive and Primed
+    annotate("text", x = 1, y = Inf, label = "Naive subfamilies", vjust = 2, hjust = 0, fontface = "italic", size = 5, color = "black") +
+    annotate("text", x = num_subfamilies, y = Inf, label = "Primed subfamilies", vjust = 2, hjust = 1, fontface = "italic", size = 5, color = "black") +
+
+    # Plot the data
+    geom_boxplot(aes(fill = type),
+                 alpha = .6,
+                 outlier.size = .5) +
+    scale_fill_manual(values = c("Random genes" = "gray29")) +
+    
+    geom_point(data = annotationobserved,
+               aes(x = family, y = log2(number), shape = type),
+               col = "black",
+               fill = "orangered",
+               size = 3) +
+    scale_shape_manual(values = c(23)) +
+    
+    geom_text(data = pval, aes(y = log2(number) + (max(log2(annotation$number), na.rm = T)/15), 
+                               label = if_else(pval < 0.001, paste0("<",round(pval, 4)), paste0(round(pval, 4))),
+                               color = if_else(pval < 0.05, "red", "black")), angle = 45) +
+    scale_color_manual(values = c("black", "red"), guide = "none") +
+
+    # Use scale_x_discrete instead of scale_x_continuous
+    scale_x_discrete() +
+
+    labs(title = title,
+         y = "log2(Number of Genes)",
+         x = "") +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16,
+                                    face = "bold",
+                                    hjust = 0.5,
+                                    lineheight = 1.2),
+          plot.caption = element_text(size = 12),
+          axis.text.x = element_text(size = 10,
+                                     angle = 45,
+                                     colour = 'black',
+                                     hjust = 1),
+          axis.title.y = element_text(size = 12),
+          axis.text.y = element_text(size = 10,
+                                     colour = "black"),
+          legend.position = legendPos,
+          legend.box.background = element_rect(fill = "transparent",
+                                               size = 0.6,
+                                               linetype = "dotted",
+                                               colour ="black"),
+          legend.spacing.y = unit(0, "cm"),
+          legend.title = element_blank())
+}
+
+
+```
+
+
+```{r, fig.width=12, message=F, warning = F, results = F}
+TE_enrichment_naive_plot <- orderedTEDistGraphBoxplots2(test = test_upregulated_enrichment, 
+            TEs = topPathwaysOrderedLog2FC, 
+            typeGenes =  "Naive upregulated", 
+            title = "TE Enrichment Near Genes Upregulated in Naive hESCs\n-10 kb to +2 kb From Gene Start\n1000 Permutations", 
+            legendPos = c(0.93, 1.09))
+
+TE_enrichment_naive_plot
+```
+
+
+#### Depletion of TE subfamilies in the promoters of upregulated genes
+We next look at subfamilies of TEs that are statistically depleted at the promoter regions of genes that are upregulated in naive hESCs. We can start by looking at all the subfamilies with a FDR lower than 0.01 (and with at least 1 observed gene containing a TE of that subfamily in its promoter region).
+
+```{r}
+#test_upregulated_depletion$pval[test_upregulated_depletion$pval < 0.01]
+
+test_upregulated_depletion$pval[intersect(names(which(test_upregulated_depletion$pval < 0.01)), names(which(test_upregulated_depletion$observed > 1)))]
+
+#test_upregulated_depletion$observed[intersect(names(which(test_upregulated_depletion$pval < 0.01)), names(which(test_upregulated_depletion$observed > 1)))]
+```
+Several subfamilies have a FDR of 0.000999001, which means that there are no random observations that are more extreme than the observed values. 
+```{r}
+test_upregulated_depletion$pval[which.min(test_upregulated_depletion$pval)]
+```
+Using the `PermutationGraph` function, we can visualize the distribution of simulated overlaps, compared with the the real overlap, for a given subfamily.
+```{r}
+PermutationGraph(test_upregulated_depletion, "L1PA7")
+```
+This can also be acomplished using the `permTest` function from `regioneR` directly.
+```{r}
+pt <- permTest(A=genesUp, B=rmsk[rmsk$subfamily == "L1M5"], randomize.function=resampleRegions, universe = genesUniverse, evaluate.function=numOverlaps, ntimes = 1000)
+
+plot(pt)
+```
+We can now visualize the enrichment using the plot functions defined above. 
+
+**Using mean and SD for the permutations.**
+```{r, fig.width=12, message=F, warning = F, results = F}
+TEDistGraph(test = test_upregulated_depletion, 
+            TEs = topPathways, 
+            typeGenes =  "Upregulated genes", 
+            title = "Correlation between gene upregulation and depletion of retrotransposons\n1000 permutations - Mean and Standard Deviation\n(-10 kb to +2 kb from TSS)", 
+            legendPos = c(0.93, 1.06))
+```
+**Using median and 0.05 and 0.95 quantiles for the permutations.**
+```{r, fig.width=12, message=F, warning = F, results = "hide"}
+TEDistGraphMedian(test = test_upregulated_depletion, 
+            TEs = topPathways, 
+            typeGenes =  "Upregulated genes", 
+            title = "Correlation between gene upregulation and depletion of retrotransposons\n1000 permutations - Median and Quantiles (5 & 95)\n(-10 kb to +2 kb from TSS)", 
+            legendPos = c(0.93, 1.06))
+```
+**Using boxplots for the permutations.**
+```{r, fig.width=12, message=F, warning = F, results = F}
+TEDistGraphBoxplots(test = test_upregulated_depletion, 
+            TEs = topPathways, 
+            typeGenes =  "Upregulated genes", 
+            title = "Correlation between gene upregulation and depletion of retrotransposons\n1000 permutations - Boxplots\n(-10 kb to +2 kb from TSS)", 
+            legendPos = c(0.93, 1.09))
+```
+```{r, fig.width=12, message=F, warning = F, results = F}
+orderedTEDistGraphBoxplots(test = test_upregulated_depletion, 
+            TEs = topPathwaysOrderedLog2FC, 
+            typeGenes =  "Upregulated genes", 
+            title = "Correlation between gene upregulation and TE depletion\n-10 kb to +2 kb from gene start\n1000 permutations",             legendPos = c(0.93, 1.09))
+```
+```{r, fig.width=12, message=F, warning = F, results = F}
+TE_depletion_naive_plot <- orderedTEDistGraphBoxplots2(test = test_upregulated_depletion, 
+            TEs = topPathwaysOrderedLog2FC, 
+            typeGenes =  "Naive upregulated", 
+            title = "TE Depletion Near Genes Upregulated in Naive hESCs\n-10 kb to +2 kb From Gene Start\n1000 Permutations", 
+            legendPos = c(0.93, 1.09))
+
+TE_depletion_naive_plot
+```
+
+```{r, fig.width=12, fig.height=14, message=F, warning = F, results = F}
+panel_TE_association_naive <- ggarrange(
+  TE_enrichment_naive_plot,
+  TE_depletion_naive_plot,        
+  labels = c("A", "B"),         # Labels for the plots
+  ncol = 1, nrow = 2,           # 1 row, 2 columns
+  font.label = list(size = 20, family = "Times", face = "bold"),  # Times font, size 20, bold
+  label.x = 0.00, label.y = 1.01  # Adjust label positions for better alignment
+)
+
+panel_TE_association_naive
+```
+
+#### Enrichment of TE subfamilies in the promoters of downregulated genes
+We now look at subfamilies of TEs that are statistically enriched at the promoter regions of genes that are downregulated in naive hESCs. We can start by looking at all the subfamilies with a FDR lower than 0.01 (and with at least 1 observed gene containing a TE of that subfamily in its promoter region).
+
+```{r}
+#test_downregulated_enrichment$pval[test_downregulated_enrichment$pval < 0.01]
+
+test_downregulated_enrichment$pval[intersect(names(which(test_downregulated_enrichment$pval < 0.01)), names(which(test_downregulated_enrichment$observed > 1)))]
+
+#test_downregulated_enrichment$observed[intersect(names(which(test_downregulated_enrichment$pval < 0.01)), names(which(test_downregulated_enrichment$observed > 1)))]
+```
+Several subfamilies have a FDR of 0.000999001, which means that there are no random observations that are more extreme than the observed values. 
+```{r}
+test_downregulated_enrichment$pval[which.min(test_downregulated_enrichment$pval)]
+```
+Using the `PermutationGraph` function, we can visualize the distribution of simulated overlaps, compared with the the real overlap, for a given subfamily.
+```{r}
+PermutationGraph(test_downregulated_enrichment, "MIR3")
+```
+This can also be acomplished using the `permTest` function from `regioneR` directly.
+```{r}
+pt <- permTest(A=genesDown, B=rmsk[rmsk$subfamily == "MIR3"], randomize.function=resampleRegions, universe = genesUniverse, evaluate.function=numOverlaps, ntimes = 1000)
+
+plot(pt)
+```
+We can now visualize the enrichment using the plot functions defined above. 
+
+**Using mean and SD for the permutations.**
+```{r, fig.width=12, message=F, warning = F, results = F}
+TEDistGraph(test = test_downregulated_enrichment, 
+            TEs = topPathways, 
+            typeGenes =  "Downregulated genes", 
+            title = "Correlation between gene downregulation and proximity to retrotransposons\n1000 permutations - Mean and Standard Deviation\n(-10 kb to +2 kb from TSS)", 
+            legendPos = c(0.93, 1.06))
+```
+**Using median and 0.05 and 0.95 quantiles for the permutations.**
+```{r, fig.width=12, message=F, warning = F, results = F}
+TEDistGraphMedian(test = test_downregulated_enrichment, 
+            TEs = topPathways, 
+            typeGenes =  "Downregulated genes", 
+            title = "Correlation between gene downregulation and proximity to retrotransposons\n1000 permutations - Median and Quantiles (5 & 95)\n(-10 kb to +2 kb from TSS)", 
+            legendPos = c(0.93, 1.06))
+```
+**Using boxplots for the permutations.**
+```{r, fig.width=12, message=F, warning = F, results = F}
+TEDistGraphBoxplots(test = test_downregulated_enrichment, 
+            TEs = topPathways, 
+            typeGenes =  "Downregulated genes", 
+            title = "Correlation between gene downregulation and proximity to retrotransposons\n1000 permutations - Boxplots\n(-10 kb to +2 kb from TSS)", 
+            legendPos = c(0.93, 1.09))
+```
+```{r, fig.width=12, message=F, warning = F, results = F}
+orderedTEDistGraphBoxplots(test = test_downregulated_enrichment, 
+            TEs = topPathwaysOrderedLog2FC, 
+            typeGenes =  "Downregulated genes", 
+            title = "Correlation between gene downregulation and TE enrichment\n-10 kb to +2 kb from gene start\n1000 permutations",             legendPos = c(0.93, 1.09))
+```
+
+```{r, fig.width=12, message=F, warning = F, results = F}
+TE_enrichment_primed_plot <- orderedTEDistGraphBoxplots2(test = test_downregulated_enrichment, 
+            TEs = topPathwaysOrderedLog2FC, 
+            typeGenes =  "Primed upregulated", 
+            title = "TE Enrichment Near Genes Upregulated in Primed hESCs\n-10 kb to +2 kb From Gene Start\n1000 Permutations", 
+            legendPos = c(0.93, 1.09))
+
+TE_enrichment_primed_plot
+```
+
+#### Depletion of TE subfamilies in the promoters of downregulated genes
+We next look at subfamilies of TEs that are statistically depleted at the promoter regions of genes that are downregulated in naive hESCs. We can start by looking at all the subfamilies with a FDR lower than 0.01 (and with at least 1 observed gene containing a TE of that subfamily in its promoter region).
+
+```{r}
+#test_downregulated_depletion$pval[test_downregulated_depletion$pval < 0.01]
+
+test_downregulated_depletion$pval[intersect(names(which(test_downregulated_depletion$pval < 0.01)), names(which(test_downregulated_depletion$observed > 1)))]
+
+#test_downregulated_depletion$observed[intersect(names(which(test_downregulated_depletion$pval < 0.01)), names(which(test_downregulated_depletion$observed > 1)))]
+```
+Several subfamilies have a FDR of 0.000999001, which means that there are no random observations that are more extreme than the observed values. 
+```{r}
+test_downregulated_depletion$pval[which.min(test_downregulated_depletion$pval)]
+```
+Using the `PermutationGraph` function, we can visualize the distribution of simulated overlaps, compared with the the real overlap, for a given subfamily.
+```{r}
+PermutationGraph(test_downregulated_depletion, "AluSp")
+```
+This can also be acomplished using the `permTest` function from `regioneR` directly.
+```{r}
+pt <- permTest(A=genesDown, B=rmsk[rmsk$subfamily == "AluSp"], randomize.function=resampleRegions, universe = genesUniverse, evaluate.function=numOverlaps, ntimes = 1000)
+
+plot(pt)
+```
+We can now visualize the enrichment using the plot functions defined above. 
+
+**Using mean and SD for the permutations.**
+```{r, fig.width=12, message=F, warning = F, results = F}
+TEDistGraph(test = test_downregulated_depletion, 
+            TEs = topPathways, 
+            typeGenes =  "Downregulated genes", 
+            title = "Correlation between gene downregulation and depletion of retrotransposons\n1000 permutations - Mean and Standard Deviation\n(-10 kb to +2 kb from TSS)", 
+            legendPos = c(0.93, 1.06))
+```
+**Using median and 0.05 and 0.95 quantiles for the permutations.**
+```{r, fig.width=12, message=F, warning = F, results = "hide"}
+TEDistGraphMedian(test = test_downregulated_depletion, 
+            TEs = topPathways, 
+            typeGenes =  "Downregulated genes", 
+            title = "Correlation between gene downregulation and depletion of retrotransposons\n1000 permutations - Median and Quantiles (5 & 95)\n(-10 kb to +2 kb from TSS)", 
+            legendPos = c(0.93, 1.06))
+```
+**Using boxplots for the permutations.**
+```{r, fig.width=12, message=F, warning = F, results = F}
+TEDistGraphBoxplots(test = test_downregulated_depletion, 
+            TEs = topPathways, 
+            typeGenes =  "Downregulated genes", 
+            title = "Correlation between gene downregulation and depletion of retrotransposons\n1000 permutations - Boxplots\n(-10 kb to +2 kb from TSS)", 
+            legendPos = c(0.93, 1.09))
+```
+```{r, fig.width=12, message=F, warning = F, results = F}
+orderedTEDistGraphBoxplots(test = test_downregulated_depletion, 
+            TEs = topPathwaysOrderedLog2FC, 
+            typeGenes =  "Downregulated genes", 
+            title = "Correlation between gene downregulation and TE depletion\n-10 kb to +2 kb from gene start\n1000 permutations",             legendPos = c(0.93, 1.09))
+```
+
+```{r, fig.width=12, message=F, warning = F, results = F}
+TE_depletion_primed_plot <- orderedTEDistGraphBoxplots2(test = test_downregulated_depletion, 
+            TEs = topPathwaysOrderedLog2FC, 
+            typeGenes =  "Primed upregulated", 
+            title = "TE Depletion Near Genes Upregulated in Primed hESCs\n-10 kb to +2 kb From Gene Start\n1000 Permutations", 
+            legendPos = c(0.93, 1.09))
+
+TE_depletion_primed_plot
+```
+
+```{r, fig.width=12, fig.height=14, message=F, warning = F, results = F}
+panel_TE_association_primed <- ggarrange(
+  TE_enrichment_primed_plot,
+  TE_depletion_primed_plot,        
+  labels = c("A", "B"),         # Labels for the plots
+  ncol = 1, nrow = 2,           # 1 row, 2 columns
+  font.label = list(size = 20, family = "Times", face = "bold"),  # Times font, size 20, bold
+  label.x = 0.00, label.y = 1.01  # Adjust label positions for better alignment
+)
+
+panel_TE_association_primed
+```

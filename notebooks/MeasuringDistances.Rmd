@@ -1,0 +1,1688 @@
+---
+title: 'HESCs - primed Vs. Naive (and XACT WT Vs. Mutant)'
+subtitle: "Measuring distances between TE elements of different subfamilies and the start of differentially expressed genes"
+author: 
+  - name: "Miguel Casanova^[Disease Transcriptomics Group, Instituto de Medicina Molecular, Faculdade de Medicina da Universidade de Lisboa]"
+    email: mcasanova@medicina.ulisboa.pt
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_notebook:
+    code_folding: hide
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/Data/H9hESCs/")
+```
+
+# {.tabset .tabset-pills}
+
+This notebook was made to measure the distance between TEs of different subfamilies and the start of differentially expressed genes. 
+
+## Data loading {.tabset .tabset-pills}
+
+Let's start by loading the libraries we will need for the analysis.
+
+```{r, warning=FALSE, results='hide',message=FALSE}
+suppressPackageStartupMessages(library(regioneR))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(refGenome))
+suppressPackageStartupMessages(library(GenomicRanges))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(zeallot))
+suppressPackageStartupMessages(library(bedtoolsr))
+
+#suppressPackageStartupMessages(library(dplyr))
+#suppressPackageStartupMessages(library(tibble))
+#suppressPackageStartupMessages(library(ggplot2))
+
+source("~/Resources/Scripts/RScripts/GTFScripts/GTF_Functions.R")
+options(bedtools.path = "/home/Resources/Software/bedtools/")
+```
+
+---
+
+### Load gene and TE GTFs and list of differentially expressed genes {.tabset .tabset-pills}
+
+#### Load gene GTF file
+We start by loading the GTF file.
+The GTF file had to be modified, in bash, with the following command:\n
+```awk -F "\t"  '{OFS="\t";if($0 !~ /^chr/){print}else{split($9,a,";");info="";for(i in a){if(a[i] ~ /"/){info=a[i]";"info}};print $1,$2,$3,$4,$5,$6,$7,$8,info}}' gencode.annotation.gtf > gencode.annotation.refGenome.gtf```
+
+We will use the `getGenePositions` function to get gene information, and we will extract the regions around the start of annotated genes (**-1bp to 0bp**). 
+
+**We should note that these are not TSSs. Check how to get TSSs!!!!**
+```{r}
+regioen <- ensemblGenome("~/TE_Gene_interaction/regioneR/")
+read.gtf(regioen, filename="gencode.v39.chr_patch_hapl_scaff.annotation_UCSC.mod.gtf")
+
+# We start by loading the relevant information from our GTF file.
+gpe <- getGenePositions(regioen) %>%
+  dplyr::select(seqid,start,end,strand,gene_name,score) %>% 
+  mutate(start2 = if_else(strand == "+", start-1, end-0), 
+         end2 = if_else(strand == "+", start+0, end+1), 
+         start = start2,
+         end = end2) %>%
+  dplyr::select(-start2, -end2)
+
+# We next remove all the annotations belonging to the mitochondrial genome.
+genesUniverse <- gpe  %>%
+  filter(seqid != "chrM") %>% 
+  as.data.frame
+
+# We next convert the GTF to a GRanges object, using the `toGRanges` function from the `regioneR` package. Finally, in order to use `bedtools`, the locations have to be sorted by chromosome and position. 
+genesUniverse <- genesUniverse %>%
+  toGRanges() %>%
+  sortSeqlevels() %>%
+  sort()
+
+# Finally, we get rid of all haplotypes and variants.
+genesUniverse <- keepSeqlevels(genesUniverse, c(paste0("chr", seq(1, 22, 1)), "chrX", "chrY"), pruning.mode = "coarse")
+```
+We can Build a bed file for all the gene coordinates.
+```{r}
+genesUniverse_bed <- data.frame(seqnames = seqnames(genesUniverse),
+                 starts = start(genesUniverse)-1,
+                 ends = end(genesUniverse),
+                 names = genesUniverse$gene_name,
+                 #names = c(rep(".", length(genesUniverse))),
+                 scores = c (rep(".", length(genesUniverse))),
+                 strands = strand(genesUniverse))
+```
+#### Load TE GTF file
+To create the TE GTF file, I'll use the `createTETable` function. This TE annotation table will then be changed to add a column with the classes/families/subfamilies to perform the permutation tests on.
+```{r}
+c(indTEAnnot, indTEAnnot_Extended, indTEAnnot_subfamilyStats) %<-% 
+  createTETable("~/TE_Gene_interaction/regioneR/UCSC_rmsk_full_table.txt", 
+                removeLowComplexity = T,
+                order = T)
+
+# After loading the GTF table with the TE annotations, we need to decide at which level we are going to be making our analysis. 
+# In this case, I choose the subfamily level. As such, I create a new column that will be used to make our experiment (corresponding to the subfamily, in this particular case).
+rmsk <- indTEAnnot %>% 
+  mutate(
+    #family = sub("\\?", "", family),
+    #toPlot = family
+    toPlot = subfamily
+    #toPlot = if_else(grepl("Alu", subfamily), subfamily, "other")
+    #toPlot = if_else(grepl("DNA", class), "DNA", if_else(grepl("LINE", class), "LINE", if_else(grepl("SINE", class), "SINE", if_else(grepl("LTR", class), class,"other")))), toPlot = if_else(toPlot == "LTR" | toPlot == "LTR/Gypsy", "other", toPlot)
+  ) %>%
+# We next convert the GTF to a GRanges object, using the `toGRanges` function from the `regioneR` package. Finally, in order to use `bedtools`, the locations have to be sorted by chromosome and position. rmsk <- rmsk %>%
+  toGRanges() %>%
+  sortSeqlevels() %>%
+  sort()
+  
+# Finally, we get rid of all haplotypes and variants.
+rmsk <- keepSeqlevels(rmsk, c(paste0("chr", seq(1, 22, 1)), "chrX", "chrY"), pruning.mode = "coarse")
+```
+```{r}
+rmsk_bed <- data.frame(seqnames = seqnames(rmsk),
+                 starts = start(rmsk)-1,
+                 ends = end(rmsk),
+                 names = rmsk$toPlot,
+                 #names = c(rep(".", length(rmsk))),
+                 scores = c (rep(".", length(rmsk))),
+                 strands = strand(rmsk))
+```
+#### Load differential expression information
+We finally load the differential expression analysis table, and select Up- and Down-regulated genes (converting them with `toGRanges`).
+```{r}
+DEGs <- (fread("~/TE_Gene_interaction/regioneR/DEA_Tables/DEGs_naiveVsPrimed_allGenes.tsv"))
+
+DEGs <- DEGs %>% 
+  remove_rownames %>% 
+  column_to_rownames(var="V1") %>%
+  mutate(Group = case_when(
+    (DEGs$log2FoldChange > 1) & (DEGs$padj < 0.01) ~ "Up",
+    (DEGs$log2FoldChange < -1) & (DEGs$padj < 0.01) ~ "Down",
+    TRUE ~ "NS")) %>%
+  arrange(stat)
+
+DEGs_UP <- DEGs %>% 
+  filter(Group == "Up") %>%
+  arrange(-stat)
+
+DEGs_DOWN <- DEGs %>% 
+  filter(Group == "Down")
+
+genesUp <- gpe  %>% 
+  filter(gene_name %in% rownames(DEGs_UP), seqid != "chrM") %>% 
+  as.data.frame %>%
+  toGRanges() %>%
+  sortSeqlevels() %>%
+  sort()
+genesUp <- keepSeqlevels(genesUp, c(paste0("chr", seq(1, 22, 1)), "chrX", "chrY"), pruning.mode = "coarse")
+
+genesDown <- gpe  %>% 
+  filter(gene_name %in% rownames(DEGs_DOWN), seqid != "chrM") %>% 
+  as.data.frame %>%
+  toGRanges() %>%
+  sortSeqlevels() %>%
+  sort()
+genesDown <- keepSeqlevels(genesDown, c(paste0("chr", seq(1, 22, 1)), "chrX", "chrY"), pruning.mode = "coarse")
+```
+```{r}
+genesUp_bed <- data.frame(seqnames = seqnames(genesUp),
+                 starts = start(genesUp)-1,
+                 ends = end(genesUp),
+                 names = genesUp$gene_name,
+                 #names = c(rep(".", length(genesUniverse))),
+                 scores = c (rep(".", length(genesUp))),
+                 strands = strand(genesUp))
+
+genesDown_bed <- data.frame(seqnames = seqnames(genesDown),
+                 starts = start(genesDown)-1,
+                 ends = end(genesDown),
+                 names = genesDown$gene_name,
+                 #names = c(rep(".", length(genesUniverse))),
+                 scores = c (rep(".", length(genesDown))),
+                 strands = strand(genesDown))
+```
+### Prepare the functions to measure distances
+To measure distances, a series of functions are going to be required. 
+
+The first is **`randomSamplingGenes`**, which takes a list of genes of interest (DEGs) and the list of all annotated genes (gene universe), and provides a random sample, with size equal to the number of genes of interest, from the universe of genes. It then sorts the genes, so that they can be used with `bedtoolsr`.
+```{r}
+randomSamplingGenes <- function(A, universe = genes,...){
+  random <- resampleRegions(A, universe) 
+  random <- random %>%
+    sortSeqlevels() %>%
+    sort()
+  
+  return(random)
+}
+```
+The second function is **`calcDistances`**. This function takes a list of genes of interest (in particular, the coordinates corresponding to the gene start) and a list of individual TEs (including a column with the names of the classes/families/subfamilies) that we want to test, and measures the median distance between the start of genes and a chosen list of TEs (either subfamily, family or class).
+```{r}
+# distanceGenesUniverse <- bt.closest(genesUniverse, rmsk, d = T) %>%
+#   mutate(Group = "Random") %>%
+#   dplyr::rename(distance = V21)
+# 
+# B <- rmsk[rmsk$subfamily %in% topPathways, ]
+
+calcDistances <- function(A, B, TEs = B$toPlot){
+  #distanceGenesUniverse <- median(bt.closest(genesUniverse, rmsk[rmsk$subfamily == "TAR1",], d = T)$V21)
+  #distanceGenesUniverse <- median(as.data.frame(distanceToNearest(genesUniverse, rmsk[rmsk$subfamily == "TAR1"]))$distance)
+  distances <- vector(mode = "numeric")
+  for(family in unique(TEs)){
+    #print(family)
+    #distanceTEtoGenes <- median(as.data.frame(distanceToNearest(A, B[B$toPlot == family]))$distance, na.rm = T)
+    distances[family] <- median(bt.closest(A, B[TEs == family,], d = T)$V21, na.rm = TRUE)
+  }
+  
+  for(name in unique(TEs)){
+    if(!(name %in% names(distances))){
+      distances[[name]] <- NA}
+  }
+  
+  distances <- distances[sort(names(distances))]
+  return(distances)
+}
+
+#dist <- calcDistances(A = genesUp, B = rmsk[rmsk$subfamily %in% topPathways, ])
+```
+The final function, **`permTestDistances`**, will use the above functions, to run the permutation test, comparing the observed median distance with the median distances to a set of randomized genes with the TEs of interest.
+```{r}
+permTestDistances <- function(A, B, TEs = B$toPlot, ntimes=1000, randomize.function = randomSamplingGenes, evaluate.function = calcDistances, alternative = "less", genes = genesUniverse){
+  
+  original.evaluate <- evaluate.function(A = A, B = B)
+  print("Finish original Evaluation")
+  
+  random.evaluate <- matrix(nrow = ntimes, ncol = length(original.evaluate))
+  colnames(random.evaluate) <- names(original.evaluate)
+  
+  for(i in 1:ntimes){
+    if(i == 1){print(date())}
+    Arandom <- randomize.function(A, universe = genes)
+    if(i == 1){print(date())}
+    random.evaluate[i,] <- evaluate.function(A = Arandom, B = B)
+    # random.evaluate[i,] <- as.data.frame(rbind(evaluate.function(A = Arandom, B = B)))
+    if(i == 1){print(date())}
+    if((i %% 25) == 0){print(i)}
+  }
+  
+    
+
+  pval <- numeric()
+  if (alternative == "greater"){
+    for(family in unique(TEs)){
+    num.nas <- length(which(is.na(random.evaluate[, family])))
+    num.valid.values <- ntimes - num.nas
+    pval[family] <- (sum(original.evaluate[family] <= random.evaluate[, family], na.rm = TRUE) + 1)/(num.valid.values + 1)
+    }
+  } else if (alternative == "less"){
+    for(family in unique(TEs)){
+    num.nas <- length(which(is.na(random.evaluate[, family])))
+    num.valid.values <- ntimes - num.nas
+    pval[family] <- (sum(original.evaluate[family] >= random.evaluate[, family], na.rm = TRUE) + 1)/(num.valid.values + 1)
+    }
+  }
+  
+  res <- list(pval = pval, 
+              ntimes = ntimes, 
+              observed = original.evaluate, 
+              permuted = random.evaluate)
+  
+  return(res)
+}
+```
+The next function will plot a graph of the permutation test, plotting the observed median distances between a given TE group and the start of a number of genes of interest and the boxplot representing the median distances to the gene start of a set of permutations for random genes. The function takes the object from the `permTestDistances` (`test`) function, a list of TE subfamily/family/class names (`TEs`), whether the genes are up or down-regulated (`typeGenes`), a title (`title`) and a position coordinates for the legend (`legendPos`).
+```{r, fig.width = 12}
+orderedTEDistanceGraphBoxplots <- function(test, TEs, typeGenes, title, legendPos = c(0.9,0.935)){
+  
+  annotationrandom <- as_tibble(test$permuted) %>% 
+    gather(key = "family", value = "number") %>% 
+    group_by(family) %>%
+    mutate(type = "Random genes", min = min(number), max = max(number), Q05 = quantile(number, 0.05, na.rm = T), Q95 = quantile(number, 0.95, na.rm = T)) 
+
+  annotationobserved <- tibble(family = names(test$observed), 
+                             number = as.numeric(test$observed), 
+                             Q05 = NA,
+                             Q95 = NA, 
+                             type = typeGenes)
+  
+  annotation <- bind_rows(annotationobserved, annotationrandom)
+  annotation$family <- factor(annotation$family, levels=TEs)
+
+  annotation <- annotation %>%
+    filter(family %in% TEs)
+  annotation$type <- factor(annotation$type, levels = c(typeGenes,"Random genes"))
+
+  annotationrandom <- annotationrandom %>%
+    filter(family %in% TEs)
+  annotationrandom$family <- factor(annotationrandom$family, levels=TEs)
+
+  annotationobserved <- annotationobserved %>%
+    filter(family %in% TEs)
+  annotationobserved$family <- factor(annotationobserved$family, levels=TEs)
+  
+  pval <- tibble(family=names(test$pval), pval=test$pval) %>%
+    full_join(annotation) %>%
+    mutate(number = if_else(is.na(Q95), number, Q95)) %>%
+    dplyr::select(-type,-Q05, -Q95) %>%
+    group_by(family) %>%
+    top_n(1, number) %>%
+    distinct
+  
+  ggplot(data = annotationrandom, aes(x = family, y = log10(number))) +
+    geom_boxplot(aes(fill = type),
+                 alpha = .6,
+                 outlier.size = .5) +
+    scale_fill_manual(values = c("Random genes" = "gray29")) +
+    geom_point(data = annotationobserved,
+               aes(x = family, y = log10(number), shape = type),
+               col = "black",
+               fill = "orangered",
+               size = 3) +
+    scale_shape_manual(values = c(23)) +
+    geom_text(data = pval, aes(y = log10(number) + (max(log10(annotation$number), na.rm = T)/15), label = if_else(pval < 0.001, paste0("<",round(pval, 4)), paste0(round(pval, 4))), color = if_else(pval < 0.05, "red", "black")), angle = 45) +
+    scale_color_manual(values = c("black", "red"), guide = "none") +
+    labs(title = title,
+         y = "log10(median distance (bp) to gene start)",
+         x = "") +
+    theme_bw() +
+    theme(plot.title = element_text(size = 16,
+                                    face = "bold",
+                                    hjust = 0.5,
+                                    lineheight = 1.2),
+          plot.caption = element_text(size = 12),
+          axis.text.x = element_text(size = 10,
+                                     angle = 45,
+                                     colour = 'black',
+                                     hjust = 1),
+          axis.title.y = element_text(size = 12),
+          axis.text.y = element_text(size = 10,
+                                     colour = "black"),
+          legend.position = legendPos,
+          legend.box.background = element_rect(fill = "transparent",
+                                               size = 0.6,
+                                               linetype = "dotted",
+                                               colour ="black"),
+          legend.spacing.y = unit(0, "cm"),
+          legend.title = element_blank())
+}
+```
+
+---
+
+### Measuring distances between gene start and elements of TE subfamilies
+To measure distances, we can use different tools. **We start by using the `distanceToNearest` function, from the `GenomicRanges` package.**
+```{r, fig.width = 5, fig.height = 6}
+randomGenes <- randomSamplingGenes(A = genesUp, universe = genesUniverse) %>%
+  toGRanges() %>%
+  sortSeqlevels() %>%
+  sort()
+
+distanceGenesUniverse_GR <- as.data.frame(distanceToNearest(genesUniverse, rmsk[rmsk$subfamily == "AluSp"])) %>%
+  mutate(Group = "All genes")
+
+distanceRandomGenes_GR <- as.data.frame(distanceToNearest(randomGenes, rmsk[rmsk$subfamily == "AluSp"])) %>%
+  mutate(Group = "Random")
+
+distanceGenesUp_GR <- as.data.frame(distanceToNearest(genesUp, rmsk[rmsk$subfamily == "AluSp"])) %>%
+  mutate(Group = "Up")
+
+distanceGenesDown_GR <- as.data.frame(distanceToNearest(genesDown, rmsk[rmsk$subfamily == "AluSp"])) %>%
+  mutate(Group = "Down")
+
+distances_GR <- rbind(distanceGenesUp_GR, distanceRandomGenes_GR)
+```
+**We next make use of the `closest` function, from the `bedtoolsr` package.**
+```{r}
+distanceGenesUniverse_bt <- bt.closest(genesUniverse, rmsk[rmsk$subfamily == "AluSp",], d = T) %>%
+  dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7,
+                "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16,
+                "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+  mutate(Group = "All genes")
+
+distanceRandomGenes_bt <- bt.closest(randomGenes, rmsk[rmsk$subfamily == "AluSp",], d = T) %>%
+  dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7,
+                "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16,
+                "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+  mutate(Group = "Random") 
+
+distanceGenesUp_bt <- bt.closest(genesUp, rmsk[rmsk$subfamily == "AluSp",], d = T) %>%
+  dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7,
+                "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16,
+                "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+  mutate(Group = "Up")
+
+distanceGenesDown_bt <- bt.closest(genesDown, rmsk[rmsk$subfamily == "AluSp",], d = T) %>%
+  dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7,
+                "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16,
+                "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+  mutate(Group = "Down")
+
+distances_bt <- rbind(distanceGenesUp_bt, distanceGenesDown_bt, distanceRandomGenes_bt)
+```
+**We can also use the `closest` function, to find the nearest upstream TE.**
+```{r}
+# randomGenes <- randomSamplingGenes(A = genesUp, universe = genesUniverse) %>%
+#   toGRanges() %>%
+#   sortSeqlevels() %>%
+#   sort()
+
+distanceGenesUniverse_btUpstream <- bt.closest(genesUniverse, rmsk[rmsk$subfamily == "AluSp",], D = "a", id = T) %>%
+  dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7,
+                "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16,
+                "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+  mutate(Group = "All genes")
+
+distanceRandomGenes_btUpstream <- bt.closest(randomGenes, rmsk[rmsk$subfamily == "AluSp",], D = "a", id = T) %>%
+  dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7,
+                "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16,
+                "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+  mutate(Group = "Random") 
+
+distanceGenesUp_btUpstream <- bt.closest(genesUp, rmsk[rmsk$subfamily == "AluSp",], D = "a", id = T) %>%
+  dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7,
+                "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16,
+                "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+  mutate(Group = "Up")
+
+distanceGenesDown_btUpstream <- bt.closest(genesDown, rmsk[rmsk$subfamily == "AluSp",], D = "a", id = T) %>%
+  dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7,
+                "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16,
+                "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+  mutate(Group = "Down")
+
+distances_btUpstream <- rbind(distanceGenesUp_btUpstream, distanceRandomGenes_btUpstream)
+#distances_btUpstream <- rbind(distanceGenesUp_btUpstream, distanceGenesDown_btUpstream, distanceRandomGenes_btUpstream, distanceGenesUniverse_btUpstream)
+```
+#### Testing for statistical differences between the distribution of distances between TEs and genes of interest
+Next, we will test whether the distribution of distances, between a given set of TEs and the start of genes of interest, is statistically different from the distribution of distances between the TEs and the start of a random set of genes.
+
+**Measure the amplitude of medians between the two groups**
+**Measure overlaps of the two groups**
+**F-statistic**
+Keep in mind effect size and how much median distance changes. This will give the biological answer.
+**With samples of this size, significance is less important. As we are testing if difference is zero. Which, at this sample size, is almost impossible!**
+**Make 4000 vs 4000 random X 1000 (or 10000) and ask how many times they are statistically different.**
+**Take the above to create the null distribution of the effect size (difference between average or medians). Compare this to the real difference.**
+**Cite "Too big to fail" and discuss this and how I would go around  testing it (using the above strategies).**
+
+```{r}
+# Kolmogorov-Smirnov Two-sample test
+ks.test(distanceRandomGenes_bt$Distance, distanceGenesUp_bt$Distance)
+
+# Welch Two Sample t-test
+t.test(distanceRandomGenes_bt$Distance, distanceGenesUp_bt$Distance)
+# Look at above t statistic and use it to have a perception of the value of the tests.
+# Look also at the differences of means.
+
+#	Wilcoxon rank sum test with continuity correction
+wilcox.test(distanceRandomGenes_bt$Distance, distanceGenesUp_bt$Distance, alternative = "two.sided")
+
+# F test to compare two variances
+var.test(distanceRandomGenes_bt$Distance, distanceGenesUp_bt$Distance)
+```
+```{r}
+# # load package
+# library(ggstatsplot)
+# 
+# # plot with statistical results
+# ggbetweenstats( # independent samples
+#   data = distances_bt,
+#   x = Group,
+#   y = Distance,
+#   #plot.type = "box", # for boxplot
+#   #type = "nonparametric", # for wilcoxon
+#   #centrality.plotting = T # remove median
+# )
+```
+**Add another violin, with a set of genes, selected with a stricter wald stat threshold (selected from the permutations of labels)**
+#### Plotting the distribution of distances between TEs and genes
+##### SVA_D
+```{r}
+distanceGenesUniverse_bt_SVA_D <- bt.closest(genesUniverse, rmsk[rmsk$subfamily == "SVA_D",], d = T) %>%
+  dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7,
+                "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16,
+                "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+  mutate(Group = "All genes")
+
+distanceRandomGenes_bt_SVA_D  <- bt.closest(randomGenes, rmsk[rmsk$subfamily == "SVA_D",], d = T) %>%
+  dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7,
+                "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16,
+                "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+  mutate(Group = "Random") 
+
+distanceGenesUp_bt_SVA_D  <- bt.closest(genesUp, rmsk[rmsk$subfamily == "SVA_D",], d = T) %>%
+  dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7,
+                "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16,
+                "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+  mutate(Group = "Up")
+
+distanceGenesDown_bt_SVA_D  <- bt.closest(genesDown, rmsk[rmsk$subfamily == "SVA_D",], d = T) %>%
+  dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7,
+                "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16,
+                "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+  mutate(Group = "Down")
+
+distances_bt_SVA_D  <- rbind(distanceGenesUp_bt_SVA_D , distanceGenesDown_bt_SVA_D , distanceRandomGenes_bt_SVA_D)
+```
+
+```{r}
+# Kolmogorov-Smirnov Two-sample test
+ks.test(distanceRandomGenes_bt_SVA_D$Distance, distanceGenesUp_bt_SVA_D$Distance)
+
+# Welch Two Sample t-test
+t.test(distanceRandomGenes_bt_SVA_D$Distance, distanceGenesUp_bt_SVA_D$Distance)
+# Look at above t statistic and use it to have a perception of the value of the tests.
+# Look also at the differences of means.
+
+#	Wilcoxon rank sum test with continuity correction
+wilcox.test(distanceRandomGenes_bt_SVA_D$Distance, distanceGenesUp_bt_SVA_D$Distance, alternative = "two.sided")
+
+# F test to compare two variances
+var.test(distanceRandomGenes_bt_SVA_D$Distance, distanceGenesUp_bt_SVA_D$Distance)
+```
+##### L1PA7
+```{r}
+distanceGenesUniverse_bt_L1PA7 <- bt.closest(genesUniverse, rmsk[rmsk$subfamily == "L1PA7",], d = T) %>%
+  dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7,
+                "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16,
+                "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+  mutate(Group = "All genes")
+
+distanceRandomGenes_bt_L1PA7  <- bt.closest(randomGenes, rmsk[rmsk$subfamily == "L1PA7",], d = T) %>%
+  dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7,
+                "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16,
+                "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+  mutate(Group = "Random") 
+
+distanceGenesUp_bt_L1PA7  <- bt.closest(genesUp, rmsk[rmsk$subfamily == "L1PA7",], d = T) %>%
+  dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7,
+                "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16,
+                "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+  mutate(Group = "Up")
+
+distanceGenesDown_bt_L1PA7  <- bt.closest(genesDown, rmsk[rmsk$subfamily == "L1PA7",], d = T) %>%
+  dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7,
+                "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16,
+                "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+  mutate(Group = "Down")
+
+distances_bt_L1PA7  <- rbind(distanceGenesUp_bt_L1PA7 , distanceGenesDown_bt_L1PA7 , distanceRandomGenes_bt_L1PA7)
+```
+
+```{r}
+# Kolmogorov-Smirnov Two-sample test
+ks.test(distanceRandomGenes_bt_L1PA7$Distance, distanceGenesUp_bt_L1PA7$Distance)
+
+# Welch Two Sample t-test
+t.test(distanceRandomGenes_bt_L1PA7$Distance, distanceGenesUp_bt_L1PA7$Distance)
+# Look at above t statistic and use it to have a perception of the value of the tests.
+# Look also at the differences of means.
+
+#	Wilcoxon rank sum test with continuity correction
+wilcox.test(distanceRandomGenes_bt_L1PA7$Distance, distanceGenesUp_bt_L1PA7$Distance, alternative = "two.sided")
+
+# F test to compare two variances
+var.test(distanceRandomGenes_bt_L1PA7$Distance, distanceGenesUp_bt_L1PA7$Distance)
+```
+
+```{r, fig.width = 5, fig.height = 6}
+distances_bt_SVA_D$Group <- factor(distances_bt_SVA_D$Group,
+                    levels = c("Up", "Down", "Random"))
+# distances$Group <- factor(distances$Group,
+#                     levels = c("Up", "Down", "Random", "AllGenes"))
+
+p_SVA_D <- ggplot(data = distances_bt_SVA_D, aes(x = Group, y = log10(abs(Distance)), fill = Group)) +
+  geom_jitter(width = .15, size = .3, alpha = 0.1, aes(color = Group)) +
+  geom_boxplot(alpha = .3,
+               width = .1,
+               notch = T,
+               fill = "transparent") +
+  geom_violin(alpha = 0.2,
+              #trim = F,
+              width = .3) +
+  scale_fill_manual(values = c("Up" = "royalblue3", "Down" = "orangered", "Random" = "gray29"), guide = "none") +
+  scale_color_manual(values = c("Up" = "royalblue3", "Down" = "orangered", "Random" = "gray29"), labels = c("Upregulated naive", "Upredulated primed", "Random genes")) +
+  scale_x_discrete(labels = c("Naive", "Primed", "Random")) +
+  # scale_fill_manual(labels = c("Up Genes", "Random Genes"), values = c("orangered", "gray29"), guide = "none") +
+  # scale_color_manual(labels = c("Up Genes", "Random Genes"), values = c("orangered", "gray29")) +
+  labs(title = "Distance of SVA_D TEs to gene start",
+       y = "log10(distance (bp) to gene start)",
+       x = "") +
+  guides(colour = guide_legend(override.aes = list(size=3, alpha = 1))) +    
+  theme_bw() +
+  theme(plot.title = element_text(size = 14,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 12,
+                                   #angle = 45,
+                                   colour = 'black',
+                                   #hjust = 1
+                                   ),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        #legend.position = c(0.9,0.935),
+        legend.position = "right",
+        # legend.box.background = element_rect(fill = "transparent",
+        #                                      size = 0.6,
+        #                                      linetype = "dotted",
+        #                                      colour ="black"),
+        legend.spacing.y = unit(0, "cm"),
+        legend.title = element_blank())
+
+dat <- ggplot_build(p_SVA_D)$data[[2]]
+
+p_SVA_D <- p_SVA_D + geom_segment(data=dat, aes(x=xmin-.05, xend=xmax+.05, 
+                               y=middle, yend=middle), colour="firebrick", size=1.2, inherit.aes = F)
+
+p_SVA_D
+##################### ADD DOWN, NS and ALL GENES
+```
+```{r, fig.width = 5, fig.height = 6}
+# Wilcoxon tests
+wilcox_naive <- wilcox.test(distances_bt_SVA_D$Distance[distances_bt_SVA_D$Group == "Up"], 
+                            distances_bt_SVA_D$Distance[distances_bt_SVA_D$Group == "Random"])
+wilcox_primed <- wilcox.test(distances_bt_SVA_D$Distance[distances_bt_SVA_D$Group == "Down"], 
+                             distances_bt_SVA_D$Distance[distances_bt_SVA_D$Group == "Random"])
+
+# Proportion difference calculation
+median_random <- median(distances_bt_SVA_D$Distance[distances_bt_SVA_D$Group == "Random"])
+median_naive <- median(distances_bt_SVA_D$Distance[distances_bt_SVA_D$Group == "Up"])
+median_primed <- median(distances_bt_SVA_D$Distance[distances_bt_SVA_D$Group == "Down"])
+
+prop_diff_naive <- (median_naive - median_random) / median_random
+prop_diff_primed <- (median_primed - median_random) / median_random
+
+# Convert p-values to scientific notation
+pval_wilcox_naive <- formatC(wilcox_naive$p.value, format = "e", digits = 2)
+pval_wilcox_primed <- formatC(wilcox_primed$p.value, format = "e", digits = 2)
+
+# Convert proportion difference to decimal with two decimal places
+prop_diff_naive_dec <- formatC(prop_diff_naive, format = "f", digits = 2)
+prop_diff_primed_dec <- formatC(prop_diff_primed, format = "f", digits = 2)
+
+# Start building the plot with improved aesthetics
+p_SVA_D <- ggplot(data = distances_bt_SVA_D, aes(x = Group, y = log10(abs(Distance)), fill = Group)) +
+  geom_jitter(width = .15, size = 0.3, alpha = 0.1, aes(color = Group)) +  # Adjusted jitter size and alpha for clarity
+  geom_boxplot(alpha = .3, width = .1, notch = TRUE, fill = "transparent") +
+  geom_violin(alpha = 0.2, width = .3, trim = TRUE) +  # Refined violin plot for smoother appearance
+  scale_fill_manual(values = c("Up" = "royalblue3", "Down" = "orangered", "Random" = "gray29"), guide = "none") +
+  scale_color_manual(values = c("Up" = "royalblue3", "Down" = "orangered", "Random" = "gray29"), 
+                     labels = c("Upregulated Naive", "Upregulated Primed", "Random Genes")) +
+  # Update x-axis labels to two lines
+  scale_x_discrete(labels = c("Upregulated\nNaive", "Upregulated\nPrimed", "Random\nGenes")) +
+  labs(title = "Distance of SVA_D TEs to gene start",
+       y = expression(paste("log"[10], "(distance (bp) to gene start)")),  # Improved y-axis label using expression
+       x = "") +
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 1))) +    
+  theme_bw() +
+  theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5, lineheight = 1.2),
+        axis.text.x = element_text(size = 12, colour = 'black', margin = margin(t = 15)),  # Added margin to give space for the text
+        axis.title.y = element_text(size = 14),
+        axis.text.y = element_text(size = 12, colour = "black"),
+        legend.position = "none",
+        legend.spacing.y = unit(0, "cm"),
+        legend.title = element_blank(),
+        text = element_text(family = "sans")) +  # Using ggplot2 default font
+  
+  # Annotate the statistical test results for naive and primed below the x-axis
+  annotate("text", x = 1, y = -0.2, label = paste("p", pval_wilcox_naive, "\neff. size", prop_diff_naive_dec), 
+           size = 4, hjust = 0.5, color = "black") +
+  annotate("text", x = 2, y = -0.2, label = paste("p", pval_wilcox_primed, "\neff. size", prop_diff_primed_dec), 
+           size = 4, hjust = 0.5, color = "black")
+
+# Add custom red line for median
+dat <- ggplot_build(p_SVA_D)$data[[2]]
+
+p_SVA_D <- p_SVA_D + 
+  geom_segment(data=dat, aes(x=xmin-.05, xend=xmax+.05, y=middle, yend=middle), 
+               colour="firebrick", size=1.2, inherit.aes = FALSE)  # Red median lines
+
+# Plot the final improved graph
+p_SVA_D
+```
+
+```{r, fig.width = 5, fig.height = 6}
+distances_bt_L1PA7$Group <- factor(distances_bt_L1PA7$Group,
+                    levels = c("Up", "Down", "Random"))
+# distances$Group <- factor(distances$Group,
+#                     levels = c("Up", "Down", "Random", "AllGenes"))
+
+p_L1PA7 <- ggplot(data = distances_bt_L1PA7, aes(x = Group, y = log10(abs(Distance)), fill = Group)) +
+  geom_jitter(width = .15, size = .3, alpha = 0.1, aes(color = Group)) +
+  geom_boxplot(alpha = .3,
+               width = .1,
+               notch = T,
+               fill = "transparent") +
+  geom_violin(alpha = 0.2,
+              #trim = F,
+              width = .3) +
+  scale_fill_manual(values = c("Up" = "royalblue3", "Down" = "orangered", "Random" = "gray29"), guide = "none") +
+  scale_color_manual(values = c("Up" = "royalblue3", "Down" = "orangered", "Random" = "gray29"), labels = c("Upregulated naive", "Upregulated primed", "Random genes")) +
+  scale_x_discrete(labels = c("Naive", "Primed", "Random")) +
+  # scale_fill_manual(labels = c("Up Genes", "Random Genes"), values = c("orangered", "gray29"), guide = "none") +
+  # scale_color_manual(labels = c("Up Genes", "Random Genes"), values = c("orangered", "gray29")) +
+  labs(title = "Distance of L1PA7 TEs to gene start",
+       y = "log10(distance (bp) to gene start)",
+       x = "") +
+  guides(colour = guide_legend(override.aes = list(size=3, alpha = 1))) +    
+  theme_bw() +
+  theme(plot.title = element_text(size = 14,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 12,
+                                   #angle = 45,
+                                   colour = 'black',
+                                   #hjust = 1
+                                   ),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        #legend.position = c(0.9,0.935),
+        legend.position = "right",
+        # legend.box.background = element_rect(fill = "transparent",
+        #                                      size = 0.6,
+        #                                      linetype = "dotted",
+        #                                      colour ="black"),
+        legend.spacing.y = unit(0, "cm"),
+        legend.title = element_blank())
+
+dat <- ggplot_build(p_L1PA7)$data[[2]]
+
+p_L1PA7 <- p_L1PA7 + geom_segment(data=dat, aes(x=xmin-.05, xend=xmax+.05, 
+                               y=middle, yend=middle), colour="firebrick", size=1.2, inherit.aes = F)
+
+p_L1PA7
+##################### ADD DOWN, NS and ALL GENES
+```
+
+```{r, fig.width = 4, fig.height = 6, warning=FALSE}
+# Wilcoxon tests
+wilcox_naive <- wilcox.test(distances_bt_L1PA7$Distance[distances_bt_L1PA7$Group == "Up"], 
+                            distances_bt_L1PA7$Distance[distances_bt_L1PA7$Group == "Random"])
+wilcox_primed <- wilcox.test(distances_bt_L1PA7$Distance[distances_bt_L1PA7$Group == "Down"], 
+                             distances_bt_L1PA7$Distance[distances_bt_L1PA7$Group == "Random"])
+
+# Proportion difference calculation
+median_random <- median(distances_bt_L1PA7$Distance[distances_bt_L1PA7$Group == "Random"])
+median_naive <- median(distances_bt_L1PA7$Distance[distances_bt_L1PA7$Group == "Up"])
+median_primed <- median(distances_bt_L1PA7$Distance[distances_bt_L1PA7$Group == "Down"])
+
+prop_diff_naive <- (median_naive - median_random) / median_random
+prop_diff_primed <- (median_primed - median_random) / median_random
+
+# Convert p-values to scientific notation
+pval_wilcox_naive <- formatC(wilcox_naive$p.value, format = "e", digits = 2)
+pval_wilcox_primed <- formatC(wilcox_primed$p.value, format = "e", digits = 2)
+
+# Convert proportion difference to decimal with two decimal places
+prop_diff_naive_dec <- formatC(prop_diff_naive, format = "f", digits = 2)
+prop_diff_primed_dec <- formatC(prop_diff_primed, format = "f", digits = 2)
+
+# Start building the plot with improved aesthetics
+p_L1PA7 <- ggplot(data = distances_bt_L1PA7, aes(x = Group, y = log10(abs(Distance)), fill = Group)) +
+  geom_jitter(width = .15, size = 0.3, alpha = 0.1, aes(color = Group)) +  # Adjusted jitter size and alpha for clarity
+  geom_boxplot(alpha = .3, width = .1, notch = TRUE, fill = "transparent") +
+  geom_violin(alpha = 0.2, width = .3, trim = TRUE) +  # Refined violin plot for smoother appearance
+  scale_fill_manual(values = c("Up" = "royalblue3", "Down" = "orangered", "Random" = "gray29"), guide = "none") +
+  scale_color_manual(values = c("Up" = "royalblue3", "Down" = "orangered", "Random" = "gray29"), 
+                     labels = c("Upregulated Naive", "Upregulated Primed", "Random Genes")) +
+  # Update x-axis labels to two lines
+  scale_x_discrete(labels = c("Upregulated\nNaive", "Upregulated\nPrimed", "Random\nGenes")) +
+  labs(title = "Distance of L1PA7 TEs to gene start",
+       y = expression(paste("log"[10], "(distance (bp) to gene start)")),  # Improved y-axis label using expression
+       x = "") +
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 1))) +    
+  theme_bw() +
+  theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5, lineheight = 1.2),
+        axis.text.x = element_text(size = 12, colour = 'black', margin = margin(t = 15)),  # Added margin to give space for the text
+        axis.title.y = element_text(size = 14),
+        axis.text.y = element_text(size = 12, colour = "black"),
+        legend.position = "none",
+        legend.spacing.y = unit(0, "cm"),
+        legend.title = element_blank(),
+        text = element_text(family = "sans")) +  # Using ggplot2 default font
+  
+  # Annotate the statistical test results for naive and primed below the x-axis
+  annotate("text", x = 1, y = -0.2, label = paste("p", pval_wilcox_naive, "\neff. size", prop_diff_naive_dec), 
+           size = 4, hjust = 0.5, color = "black") +
+  annotate("text", x = 2, y = -0.2, label = paste("p", pval_wilcox_primed, "\neff. size", prop_diff_primed_dec), 
+           size = 4, hjust = 0.5, color = "black")
+
+# Add custom red line for median
+dat <- ggplot_build(p_L1PA7)$data[[2]]
+
+p_L1PA7 <- p_L1PA7 + 
+  geom_segment(data=dat, aes(x=xmin-.05, xend=xmax+.05, y=middle, yend=middle), 
+               colour="firebrick", size=1.2, inherit.aes = FALSE)  # Red median lines
+
+# Plot the final improved graph
+p_L1PA7
+```
+```{r, fig.width = 9, fig.height = 6, warning=FALSE}
+# Combine the two plots into one panel with shared legend and labels on top
+combined_panel_dist <- ggarrange(
+  p_SVA_D, p_L1PA7,
+  labels = c("A", "B"),    # Label the plots A and B
+  font.label = list(size = 20, family = "Times New Roman", face = "bold"),  # Style for labels
+  common.legend = TRUE,    # Share the legend
+  legend = "none",       # Position legend at the bottom
+  ncol = 2, nrow = 1,      # Arrange in two columns
+  label.x = 0.05,          # Adjust the x position of the labels
+  label.y = 1.005           # Adjust the y position of the labels to be at the top
+)
+
+combined_panel_dist
+```
+
+```{r, fig.width = 5, fig.height = 6}
+ggplot(data=distances_bt, aes(x=log10(abs(Distance)), group=Group, fill=Group)) +
+  geom_density(adjust=1.5, alpha=.4) +
+  theme_bw()
+```
+```{r}
+distanceGenesUp_bt 
+distanceGenesDown_bt
+distanceGenesUniverse_bt
+
+DEGs
+DEGs_UP
+DEGs_DOWN
+
+mergeDf <- merge(x = DEGs, y = distanceGenesUniverse_bt, by.x = "row.names", by.y = "GeneName", all.x = T)
+```
+```{r, fig.height=6, fig.width=7}
+symmetric_limits <- function (x) 
+{
+    max <- max(abs(x))
+    c(-max, max)
+}
+
+# Now, we only have to plot the volcano plot.
+ggplot(mergeDf) +
+  theme_bw() +
+  geom_point(aes(x = log2FoldChange, y = abs(Distance), color = Group.x), size = 1, alpha = .2, na.rm = T) +
+  scale_colour_manual(breaks = c("NS", "Up", "Down"),
+                      values = c("gray50", "seagreen", "firebrick")) + # Add a manual scale color (and order), for the elements in column "Class".
+  ggtitle("Log2Fold change vs distance to nearest AluSp") +
+  xlab("log2 fold change") + 
+  ylab("Distance to nearest AluSp (bp)") +
+  scale_x_continuous(limits = symmetric_limits) +
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 0.8))) + # Over-ride aesthetics for figure legend.
+  theme(legend.position = c(0.93, 0.9),
+        legend.background = element_rect(fill = "white",
+                                         size = 0.5, 
+                                         linetype = 3, 
+                                         colour ="black"),
+        legend.title = element_blank(),
+        plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+        axis.title = element_text(size = 12)) 
+
+```
+
+### Plotting for multiple subfamilies
+We can start by creating a dataframe, containing the distances between genes (all genes, random genes, up genes and down genes) and the closest member of a list of TE subfamilies. 
+
+In this case, we will use the TE subfamilies identified using the GSEA strategy, as those more differentially expressed.
+```{r}
+randomGenesUp <- randomSamplingGenes(A = genesUp, universe = genesUniverse) %>%
+  toGRanges() %>%
+  sortSeqlevels() %>%
+  sort()
+
+randomGenesDown <- randomSamplingGenes(A = genesDown, universe = genesUniverse) %>%
+  toGRanges() %>%
+  sortSeqlevels() %>%
+  sort()
+
+distanceGenesUniverse_bt <- list()
+distanceRandomGenesUp_bt <- list()
+distanceRandomGenesDown_bt <- list()
+distanceGenesUp_bt <- list()
+distanceGenesDown_bt <- list()
+
+for (TE in topPathwaysOrderedLog2FC) {
+  distanceGenesUniverse_bt_temp <- bt.closest(genesUniverse, rmsk[rmsk$subfamily == TE, ], d = T) %>%
+    dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7, 
+                  "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16, 
+                  "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+    mutate(Group = "All")
+  distanceGenesUniverse_bt[[TE]] <- distanceGenesUniverse_bt_temp
+  
+  distanceRandomGenesUp_bt_temp <- bt.closest(randomGenesUp, rmsk[rmsk$subfamily == TE, ], d = T) %>%
+    dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7, 
+                  "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16, 
+                  "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+    mutate(Group = "Random Up")
+  distanceRandomGenesUp_bt[[TE]] <- distanceRandomGenesUp_bt_temp
+
+  distanceRandomGenesDown_bt_temp <- bt.closest(randomGenesDown, rmsk[rmsk$subfamily == TE, ], d = T) %>%
+    dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7, 
+                  "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16, 
+                  "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+    mutate(Group = "Random Down")
+  distanceRandomGenesDown_bt[[TE]] <- distanceRandomGenesDown_bt_temp
+  
+  distanceGenesUp_bt_temp <- bt.closest(genesUp, rmsk[rmsk$subfamily == TE, ], d = T) %>%
+    dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7, 
+                  "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16, 
+                  "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+    mutate(Group = "Upregulated")
+  distanceGenesUp_bt[[TE]] <- distanceGenesUp_bt_temp
+  
+  distanceGenesDown_bt_temp <- bt.closest(genesDown, rmsk[rmsk$subfamily == TE, ], d = T) %>%
+    dplyr::select("GeneChromosome" = V1, "GeneStart" = V2, "GeneEnd" = V3, "GeneStrand" = V6, "GeneName" = V7, 
+                  "TEChromosome" = V9, "TEStart" = V10, "TEEnd" = V11, "TEStand" = V15, "IndTEDuplication" = V16, 
+                  "TESubfamily" = V17, "TEFamily" = V18, "TEClass" = V19, "ToPlot" = V20, "Distance" = V21) %>%
+    mutate(Group = "Downregulated")
+  distanceGenesDown_bt[[TE]] <- distanceGenesDown_bt_temp
+}
+
+distanceGenesUniverse_bt <- dplyr::bind_rows(distanceGenesUniverse_bt)
+distanceRandomGenesUp_bt <- dplyr::bind_rows(distanceRandomGenesUp_bt)
+distanceRandomGenesDown_bt <- dplyr::bind_rows(distanceRandomGenesDown_bt)
+distanceGenesUp_bt <- dplyr::bind_rows(distanceGenesUp_bt)
+distanceGenesDown_bt <- dplyr::bind_rows(distanceGenesDown_bt)
+
+fullDataFrameUpregulated <- bind_rows(distanceRandomGenesUp_bt, distanceGenesUp_bt)
+fullDataFrameDownregulated <- bind_rows(distanceRandomGenesDown_bt, distanceGenesDown_bt)
+```
+
+```{r}
+sum(is.nan(as.matrix(fullDataFrameUpregulated$Distance)))
+sum(is.nan(as.matrix(fullDataFrameUpregulated$ToPlot)))
+sum(is.nan(as.matrix(fullDataFrameUpregulated$Group)))
+unique(fullDataFrameUpregulated$ToPlot)
+fullDataFrameUpregulated[fullDataFrameUpregulated$ToPlot == ".",]
+```
+
+**Add another violin, with a set of genes, selected with a stricter wald stat threshold (selected from the permutations of labels)**
+#### Plotting the distribution of distances between TEs and genes
+```{r, fig.width = 12, fig.height = 8}
+fullDataFrameUpregulated$Group <- factor(fullDataFrameUpregulated$Group,
+                    levels = c("Upregulated", "Random Up"))
+# distances$Group <- factor(distances$Group,
+#                     levels = c("Up", "Down", "Random", "AllGenes"))
+
+fullDataFrameUpregulated$ToPlot <- factor(fullDataFrameUpregulated$ToPlot, levels = topPathwaysOrderedLog2FC)
+
+ggplot(data = fullDataFrameUpregulated[fullDataFrameUpregulated$ToPlot %in% topPathwaysOrderedLog2FC, ], 
+       aes(x = ToPlot, y = log10(abs(Distance)), fill = Group, color = Group)) +
+  introdataviz::geom_split_violin(alpha = .4, 
+                                  trim = FALSE,
+                                  color = "black") +
+  # geom_boxplot(width = .2, 
+  #              alpha = .4, 
+  #              fatten = NULL, 
+  #              show.legend = FALSE, 
+  #              outlier.shape = NA,
+  #              position = position_dodge(width = 0.5)) +
+  # stat_summary(fun = median, 
+  #              geom = "pointrange", 
+  #              show.legend = F, 
+  #              position = position_dodge(.6), 
+  #              size = .15, 
+  #              color = "firebrick") +
+  stat_summary(fun = median, 
+               geom = "crossbar", 
+               show.legend = F, 
+               position = position_dodge(.6), 
+               size = .5,
+               width = .5) +
+  # geom_violin(position = position_dodge(width = 0.7),
+  #             trim = F,
+  #             alpha = 0.5) +
+  # geom_boxplot(width = 0.3,
+  #              position = position_dodge(width = 0.7),
+  #              outlier.shape = NA,
+  #              alpha = 0.001) +
+  # stat_summary(fun.data=mean_sdl, fun.args = list(mult = 1),
+  #              geom="pointrange", color="black",
+  #              shape = 18, size = 0.3,
+  #              position = position_dodge(width = 0.5)) +
+  scale_fill_manual(values = c("Upregulated" = "orangered", "Random Up" = "gray29")) +
+  scale_color_manual(values = c("Upregulated" = "firebrick", "Random Up" = "black"), guide = "none") +
+  labs(title = "Distance of selected TE subfamilies to gene start of upregulated and random genes",
+       y = "log10(distance (bp) to gene start)",
+       x = "") +
+  guides(colour = guide_legend(override.aes = list(size=3, alpha = 1, linetype = 0))) +    
+  ggpubr::theme_pubr() +
+  theme(plot.title = element_text(size = 14,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black',
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = c(0.9,0.935),
+        #legend.position = "bottom",
+        legend.box.background = element_rect(fill = "transparent",
+                                             size = 0.6,
+                                             linetype = "dotted",
+                                             colour ="black"),
+        legend.spacing.y = unit(0, "cm"),
+        legend.title = element_blank())
+##################### ADD DOWN, NS and ALL GENES
+```
+```{r, fig.width = 12, fig.height = 8}
+ggplot(data = fullDataFrameUpregulated[fullDataFrameUpregulated$ToPlot %in% topPathwaysOrderedLog2FC, ], 
+       aes(x = ToPlot, y = log10(abs(Distance)), fill = Group)) +
+  
+  # Violin plot with proper fill for the legend
+  introdataviz::geom_split_violin(alpha = .6, 
+                                  trim = FALSE,
+                                  color = "black") +
+  
+  # Crossbar for median without adding to legend
+  stat_summary(fun = median, 
+               geom = "crossbar", 
+               position = position_dodge(.6), 
+               size = 0.5,
+               color = "darkred",   # Color of median line
+               width = 0.5, show.legend = FALSE) +  # Ensure crossbar doesn't show in legend
+  
+  # Improve aesthetics for fill colors
+  scale_fill_manual(values = c("Upregulated" = "orangered", "Random Up" = "gray80")) +
+  scale_color_manual(values = c("Upregulated" = "orangered", "Random Up" = "gray80"), guide = "none") +
+  
+  # Titles and labels
+  labs(title = "TE Subfamily Distance to Gene Start (Upregulated vs. Random Genes)",
+       subtitle = "Median distances for selected TE subfamilies",
+       y = "log10(Distance to gene start)",
+       x = "") +
+  
+  # Adjust the x-axis text and its rotation
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) +
+  
+  # Fix legend to show only violin fill and no extra geoms
+  guides(fill = guide_legend(override.aes = list(color = NA))) +  # Remove borders in legend
+  
+  # Adjust the theme for improved readability
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 12, hjust = 0.5),
+        axis.title.y = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10),
+        legend.position = "top",  # Legend positioned at the top
+        legend.title = element_blank())  # No legend title
+
+```
+```{r, fig.width = 12, fig.height = 8}
+ggplot(data = fullDataFrameUpregulated[fullDataFrameUpregulated$ToPlot %in% topPathwaysOrderedLog2FC, ], 
+       aes(x = ToPlot, y = log10(abs(Distance)), fill = Group)) +
+  
+  # Add rectangles to separate the naive and primed subfamilies
+  annotate("rect", xmin = 0.5, xmax = split_point + 0.5, ymin = -Inf, ymax = Inf, fill = "#0072B2", alpha = 0.05) +
+  annotate("rect", xmin = split_point + 0.5, xmax = Inf, ymin = -Inf, ymax = Inf, fill = "#D55E00", alpha = 0.05) +
+
+  # Add a vertical dashed line at the split point
+  geom_vline(xintercept = split_point + 0.5, linetype = "dotted", color = "black", size = 0.5) +
+
+  # Annotate for Naive and Primed subfamilies
+  annotate("text", x = 1, y = Inf, label = "Naive subfamilies", vjust = 1.5, hjust = 0, fontface = "italic", size = 5, color = "black") +
+  annotate("text", x = num_subfamilies, y = Inf, label = "Primed subfamilies", vjust = 1.5, hjust = 1, fontface = "italic", size = 5, color = "black") +
+  
+  # Violin plot with proper fill for the legend
+  introdataviz::geom_split_violin(alpha = .6, 
+                                  trim = FALSE,
+                                  color = "black") +
+  
+  # Crossbar for median without adding to legend
+  stat_summary(fun = median, 
+               geom = "crossbar", 
+               position = position_dodge(.6), 
+               size = 0.5,
+               color = "darkred",   # Color of median line
+               width = 0.5, show.legend = FALSE) +  # Ensure crossbar doesn't show in legend
+  
+  # Improve aesthetics for fill colors
+  scale_fill_manual(values = c("Upregulated" = "orangered", "Random Up" = "gray60")) +
+  scale_color_manual(values = c("Upregulated" = "orangered", "Random Up" = "gray60"), guide = "none") +
+  
+  # Titles and labels
+  labs(title = "TE Subfamily Distance to Gene Start (Upregulated vs. Random Genes)",
+       subtitle = "Median distances for selected TE subfamilies",
+       y = "log10(Distance to gene start)",
+       x = "") +
+  
+  # Adjust the x-axis text and its rotation
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) +
+  
+  # Fix legend to show only violin fill and no extra geoms
+  guides(fill = guide_legend(override.aes = list(color = NA))) +  # Remove borders in legend
+  
+  # Adjust the theme for improved readability
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 12, hjust = 0.5),
+        axis.title.y = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10),
+        legend.position = "top",  # Legend positioned at the top
+        legend.title = element_blank())
+
+```
+```{r, fig.width = 12, fig.height = 8, warning=FALSE}
+ggplot(data = fullDataFrameUpregulated[fullDataFrameUpregulated$ToPlot %in% topPathwaysOrderedLog2FC, ], 
+       aes(x = ToPlot, y = log10(abs(Distance)), fill = Group)) +
+  
+  # Add rectangles to separate the naive and primed subfamilies
+  annotate("rect", xmin = 0.5, xmax = split_point + 0.5, ymin = -Inf, ymax = Inf, fill = "#0072B2", alpha = 0.05) +
+  annotate("rect", xmin = split_point + 0.5, xmax = Inf, ymin = -Inf, ymax = Inf, fill = "#D55E00", alpha = 0.05) +
+
+  # Add a vertical dashed line at the split point
+  geom_vline(xintercept = split_point + 0.5, linetype = "dotted", color = "black", size = 0.5) +
+
+  # Annotate for Naive and Primed subfamilies
+  annotate("text", x = 1, y = Inf, label = "Naive subfamilies", vjust = 1.5, hjust = 0, fontface = "italic", size = 5, color = "black") +
+  annotate("text", x = num_subfamilies, y = Inf, label = "Primed subfamilies", vjust = 1.5, hjust = 1, fontface = "italic", size = 5, color = "black") +
+  
+  # Violin plot with proper fill for the legend
+  introdataviz::geom_split_violin(alpha = .6, 
+                                  trim = FALSE,
+                                  color = "black") +
+  
+  # Crossbar for median without adding to legend
+  stat_summary(fun = median, 
+               geom = "crossbar", 
+               position = position_dodge(.6), 
+               size = 0.5,
+               color = "darkred",   # Color of median line
+               width = 0.5, show.legend = FALSE) +  # Ensure crossbar doesn't show in legend
+  
+  # Improve aesthetics for fill colors and update the label for 'Upregulated Naive'
+  scale_fill_manual(values = c("Upregulated" = "orangered", "Random Up" = "gray60"),
+                    labels = c("Upregulated" = "Upregulated naive", "Random Up" = "Random Genes")) +
+  scale_color_manual(values = c("Upregulated" = "orangered", "Random Up" = "gray60"), guide = "none") +
+  
+  # Titles and labels
+  labs(title = "TE Subfamily Distance to Gene Start\nUpregulated Naive Vs. Random Genes",
+       subtitle = "Median distances to selected TE subfamilies",
+       y = "log10(Distance to gene start)",
+       x = "") +
+  
+  # Adjust the x-axis text and its rotation
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) +
+  
+  # Fix legend to show only violin fill and no extra geoms
+  guides(fill = guide_legend(override.aes = list(color = NA))) +  # Remove borders in legend
+  
+  # Adjust the theme for improved readability
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 12, hjust = 0.5),
+        axis.title.y = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10),
+        legend.position = c(0.9, 1.07),  # Adjusted legend position
+        legend.box.background = element_rect(fill = "transparent", 
+                                             size = 0.6, 
+                                             linetype = "dotted", 
+                                             colour ="black"),
+        legend.spacing.y = unit(0, "cm"),
+        legend.title = element_blank())
+
+
+```
+#### Stats for tables and plotting
+```{r}
+# Group by TE Subfamily (ToPlot) and calculate relevant statistics
+stats_table <- fullDataFrameUpregulated %>%
+  group_by(ToPlot) %>%
+  summarize(
+    p_wilcox = wilcox.test(Distance[Group == "Upregulated"], Distance[Group == "Random Up"])$p.value,
+    cohen_d = effsize::cohen.d(Distance[Group == "Upregulated"], Distance[Group == "Random Up"])$estimate,
+    cliffs_delta = effsize::cliff.delta(Distance[Group == "Upregulated"], Distance[Group == "Random Up"])$estimate,
+    prop_dist_change = median(Distance[Group == "Upregulated"]) / median(Distance[Group == "Random Up"])
+  ) %>%
+  # Adjust p-values using FDR
+  mutate(p_wilcox_adj = p.adjust(p_wilcox, method = "fdr"), .after = p_wilcox)
+
+
+# Display the table
+stats_table
+
+```
+Final Stats table
+```{r}
+# Ensure tidyverse and necessary libraries are loaded
+library(dplyr)
+
+# Group by TE subfamily to compute the relevant tests and statistics
+summary_stats_naive <- fullDataFrameUpregulated %>%
+  group_by(ToPlot) %>%
+  summarize(
+    # Wilcoxon rank-sum test
+    p_wilcox = wilcox.test(Distance[Group == "Upregulated"], 
+                           Distance[Group == "Random Up"], 
+                           alternative = "two.sided")$p.value,
+    
+    # Kolmogorov-Smirnov test
+    p_ks = ks.test(Distance[Group == "Upregulated"], 
+                   Distance[Group == "Random Up"])$p.value,
+    
+
+    # Median of observed distances (upregulated) and random distances
+    median_observed = median(Distance[Group == "Upregulated"]),
+    median_random = median(Distance[Group == "Random Up"]),
+    # Proportion of the difference: (observed - random) / random
+    prop_diff = (median_observed - median_random) / median_random
+  )
+
+# Adjust p-values for multiple testing (optional)
+summary_stats_naive <- summary_stats_naive %>%
+  mutate(
+    p_wilcox_adj = p.adjust(p_wilcox, method = "fdr"),
+    p_ks_adj = p.adjust(p_ks, method = "fdr")) %>% 
+  select("TE subfamilies"  = 1, "p Wilcoxon" = 2, "p Wilcoxon FDR" = 7, "p Kolmogorov Smirnov" = 3, "p Kolmogorov Smirnov FDR" = 8, "Observed median distances" = 4, "Random median distances" = 5, "Proportion of difference" = 6) %>% 
+  dplyr::slice(-41) 
+
+# Display the summary statistics
+summary_stats_naive 
+```
+#### Plots with stats
+```{r, fig.width = 12, fig.height = 8, warning=FALSE}
+# Merge the stats with the full dataset
+fullDataFrameUpregulated_merged <- fullDataFrameUpregulated[fullDataFrameUpregulated$ToPlot %in% topPathwaysOrderedLog2FC, ] %>%
+  left_join(summary_stats, by = c("ToPlot" = "TE subfamilies"))
+
+# Mark the significant subfamilies and compute the y-position for the asterisks
+fullDataFrameUpregulated_merged <- fullDataFrameUpregulated_merged %>%
+  group_by(ToPlot) %>%
+  mutate(
+    is_significant = ifelse(`p Wilcoxon FDR` < 0.001 & abs(`Proportion of difference`) > 0.10, TRUE, FALSE),
+    asterisk_y = ifelse(is_significant, max(log10(abs(Distance))) + 0.5, NA)  # Adjust the position of the asterisk above the violin
+  )
+
+# Plot
+ggplot(data = fullDataFrameUpregulated_merged, 
+       aes(x = ToPlot, y = log10(abs(Distance)), fill = Group)) +
+  
+  # Add rectangles to separate the naive and primed subfamilies
+  annotate("rect", xmin = 0.5, xmax = split_point + 0.5, ymin = -Inf, ymax = Inf, fill = "#0072B2", alpha = 0.05) +
+  annotate("rect", xmin = split_point + 0.5, xmax = Inf, ymin = -Inf, ymax = Inf, fill = "#D55E00", alpha = 0.05) +
+
+  # Add a vertical dashed line at the split point
+  geom_vline(xintercept = split_point + 0.5, linetype = "dotted", color = "black", size = 0.5) +
+
+  # Annotate for Naive and Primed subfamilies
+  annotate("text", x = 1, y = Inf, label = "Naive subfamilies", vjust = 1.5, hjust = 0, fontface = "italic", size = 5, color = "black") +
+  annotate("text", x = num_subfamilies, y = Inf, label = "Primed subfamilies", vjust = 1.5, hjust = 1, fontface = "italic", size = 5, color = "black") +
+  
+  # Violin plot with proper fill for the legend
+  introdataviz::geom_split_violin(alpha = .6, 
+                                  trim = FALSE,
+                                  color = "black") +
+  
+  # Crossbar for median without adding to legend
+  stat_summary(fun = median, 
+               geom = "crossbar", 
+               position = position_dodge(.6), 
+               size = 0.5,
+               color = "darkred",   # Color of median line
+               width = 0.5, show.legend = FALSE) +  # Ensure crossbar doesn't show in legend
+  
+  # Improve aesthetics for fill colors and update the label for 'Upregulated Naive'
+  scale_fill_manual(values = c("Upregulated" = "orangered", "Random Up" = "gray60"),
+                    labels = c("Upregulated" = "Upregulated naive", "Random Up" = "Random Genes")) +
+  scale_color_manual(values = c("Upregulated" = "orangered", "Random Up" = "gray60"), guide = "none") +
+  
+  # Titles and labels
+  labs(title = "TE Subfamily Distance to Gene Start\nUpregulated Naive Vs. Random Genes",
+       subtitle = "Median distances to selected TE subfamilies",
+       y = "log10(Distance to gene start)",
+       x = "") +
+  
+  # Adjust the x-axis text and its rotation
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) +
+  
+  # Fix legend to show only violin fill and no extra geoms
+  guides(fill = guide_legend(override.aes = list(color = NA))) +  # Remove borders in legend
+  
+  # Add asterisks for significant subfamilies on top of the violin
+  geom_text(data = fullDataFrameUpregulated_merged %>%  select(ToPlot, Group, is_significant, asterisk_y) %>% distinct(),
+            aes(x = ToPlot, y = asterisk_y, label = ifelse(is_significant, "*", "")),
+            color = "darkred", size = 6, fontface = "italic", vjust = -0.5, na.rm = TRUE) +
+
+  # Adjust the theme for improved readability
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 12, hjust = 0.5),
+        axis.title.y = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10),
+        legend.position = c(0.9, 1.07),  # Adjusted legend position
+        legend.box.background = element_rect(fill = "transparent", 
+                                             size = 0.6, 
+                                             linetype = "dotted", 
+                                             colour ="black"),
+        legend.spacing.y = unit(0, "cm"),
+        legend.title = element_blank())
+
+
+
+```
+```{r, fig.width = 12, fig.height = 8, warning=FALSE}
+# Merge the stats with the full dataset
+fullDataFrameUpregulated_merged <- fullDataFrameUpregulated[fullDataFrameUpregulated$ToPlot %in% topPathwaysOrderedLog2FC, ] %>%
+  left_join(summary_stats, by = c("ToPlot" = "TE subfamilies"))
+
+# Mark the significant subfamilies and add arrow direction
+fullDataFrameUpregulated_merged <- fullDataFrameUpregulated_merged %>%
+  group_by(ToPlot) %>%
+  mutate(
+    is_significant = ifelse(`p Wilcoxon FDR` < 0.001 & abs(`Proportion of difference`) > 0.15, TRUE, FALSE),
+    # Set the y-position for all asterisks at the bottom
+    asterisk_y = ifelse(is_significant, -0.5, NA),
+    # Determine arrowhead direction: up for increased distance, down for decreased
+    arrow_label = ifelse(`Proportion of difference` > 0, "▲", ifelse(`Proportion of difference` < 0, "▼", ""))
+  )
+
+# Plot
+ggplot(data = fullDataFrameUpregulated_merged, 
+       aes(x = ToPlot, y = log10(abs(Distance)), fill = Group)) +
+  
+  # Add rectangles to separate the naive and primed subfamilies
+  annotate("rect", xmin = 0.5, xmax = split_point + 0.5, ymin = -Inf, ymax = Inf, fill = "#0072B2", alpha = 0.05) +
+  annotate("rect", xmin = split_point + 0.5, xmax = Inf, ymin = -Inf, ymax = Inf, fill = "#D55E00", alpha = 0.05) +
+
+  # Add a vertical dashed line at the split point
+  geom_vline(xintercept = split_point + 0.5, linetype = "dotted", color = "black", size = 0.5) +
+
+  # Annotate for Naive and Primed subfamilies
+  annotate("text", x = 1, y = Inf, label = "Naive subfamilies", vjust = 1.5, hjust = 0, fontface = "italic", size = 5, color = "black") +
+  annotate("text", x = num_subfamilies, y = Inf, label = "Primed subfamilies", vjust = 1.5, hjust = 1, fontface = "italic", size = 5, color = "black") +
+  
+  # Violin plot with proper fill for the legend
+  introdataviz::geom_split_violin(alpha = .6, 
+                                  trim = FALSE,
+                                  color = "black") +
+  
+  # Crossbar for median without adding to legend
+  stat_summary(fun = median, 
+               geom = "crossbar", 
+               position = position_dodge(.6), 
+               size = 0.5,
+               color = "darkred",   # Color of median line
+               width = 0.5, show.legend = FALSE) +  # Ensure crossbar doesn't show in legend
+  
+  # Improve aesthetics for fill colors and update the label for 'Upregulated Naive'
+  scale_fill_manual(values = c("Upregulated" = "orangered", "Random Up" = "gray60"),
+                    labels = c("Upregulated" = "Upregulated naive", "Random Up" = "Random Genes")) +
+  scale_color_manual(values = c("Upregulated" = "orangered", "Random Up" = "gray60"), guide = "none") +
+  
+  # Titles and labels
+  labs(title = "TE Subfamily Distance to Gene Start\nUpregulated Naive Vs. Random Genes",
+       subtitle = "Median distances to selected TE subfamilies (padj < 0.001 & Proportion of Difference > 15%)",
+       y = "log10(Distance to gene start)",
+       x = "") +
+  
+  # Adjust the x-axis text and its rotation
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) +
+  
+  # Fix legend to show only violin fill and no extra geoms
+  guides(fill = guide_legend(override.aes = list(color = NA))) +  # Remove borders in legend
+  
+  # Add asterisks for significant subfamilies at the bottom of the plot
+  geom_text(data = fullDataFrameUpregulated_merged %>% select(ToPlot, Group, is_significant, asterisk_y) %>% distinct(),
+            aes(x = ToPlot, y = asterisk_y, label = ifelse(is_significant, "*", "")),
+            color = "darkred", size = 8, vjust = 1.5, na.rm = TRUE) +  # Larger size for asterisks
+  
+  # Add arrowheads to the right of the asterisks (slightly shifted right using arrow_x)
+  geom_text(data = fullDataFrameUpregulated_merged %>% select(ToPlot, Group, is_significant, asterisk_y, arrow_label) %>% distinct(),
+            aes(x = ToPlot, y = asterisk_y, label = arrow_label),
+            color = "darkred", size = 4, vjust = 0.5, na.rm = TRUE) +  # Smaller size for arrowheads
+  
+  # Adjust the theme for improved readability
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 12, hjust = 0.5),
+        axis.title.y = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10),
+        legend.position = c(0.9, 1.07),  # Adjusted legend position
+        legend.box.background = element_rect(fill = "transparent", 
+                                             size = 0.6, 
+                                             linetype = "dotted", 
+                                             colour ="black"),
+        legend.spacing.y = unit(0, "cm"),
+        legend.title = element_blank())
+
+
+
+
+```
+#### Genes upregulated in primed hESCs
+
+```{r, fig.width = 12, fig.height = 8}
+fullDataFrameDownregulated$Group <- factor(fullDataFrameDownregulated$Group,
+                    levels = c("Downregulated", "Random Down"))
+
+fullDataFrameDownregulated$ToPlot <- factor(fullDataFrameDownregulated$ToPlot, levels = topPathwaysOrderedLog2FC)
+
+ggplot(data = fullDataFrameDownregulated[fullDataFrameDownregulated$ToPlot %in% topPathwaysOrderedLog2FC, ], 
+       aes(x = ToPlot, y = log10(abs(Distance)), fill = Group, color = Group)) +
+  introdataviz::geom_split_violin(alpha = .4, 
+                                  trim = FALSE,
+                                  color = "black") +
+  # geom_boxplot(width = .2, 
+  #              alpha = .4, 
+  #              fatten = NULL, 
+  #              show.legend = FALSE, 
+  #              outlier.shape = NA,
+  #              position = position_dodge(width = 0.5)) +
+  # stat_summary(fun = median, 
+  #              geom = "pointrange", 
+  #              show.legend = F, 
+  #              position = position_dodge(.6), 
+  #              size = .15, 
+  #              color = "firebrick") +
+  stat_summary(fun = median, 
+               geom = "crossbar", 
+               show.legend = F, 
+               position = position_dodge(.6), 
+               size = .5,
+               width = .5) +
+  # geom_violin(position = position_dodge(width = 0.7),
+  #             trim = F,
+  #             alpha = 0.5) +
+  # geom_boxplot(width = 0.3,
+  #              position = position_dodge(width = 0.7),
+  #              outlier.shape = NA,
+  #              alpha = 0.001) +
+  # stat_summary(fun.data=mean_sdl, fun.args = list(mult = 1),
+  #              geom="pointrange", color="black",
+  #              shape = 18, size = 0.3,
+  #              position = position_dodge(width = 0.5)) +
+  scale_fill_manual(values = c("Downregulated" = "orangered", "Random Down" = "gray29")) +
+  scale_color_manual(values = c("Downregulated" = "firebrick", "Random Down" = "black"), guide = "none") +
+  labs(title = "Distance of selected TE subfamilies to gene start of downregulated and random genes",
+       y = "log10(distance (bp) to gene start)",
+       x = "") +
+  guides(colour = guide_legend(override.aes = list(size=3, alpha = 1, linetype = 0))) +    
+  ggpubr::theme_pubr() +
+  theme(plot.title = element_text(size = 14,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black',
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = c(0.9,0.935),
+        #legend.position = "bottom",
+        legend.box.background = element_rect(fill = "transparent",
+                                             size = 0.6,
+                                             linetype = "dotted",
+                                             colour ="black"),
+        legend.spacing.y = unit(0, "cm"),
+        legend.title = element_blank())
+##################### ADD DOWN, NS and ALL GENES
+```
+Stats for primed genes
+```{r}
+# Ensure tidyverse and necessary libraries are loaded
+library(dplyr)
+
+# Group by TE subfamily to compute the relevant tests and statistics
+summary_stats_primed <- fullDataFrameDownregulated %>%
+  group_by(ToPlot) %>%
+  summarize(
+    # Wilcoxon rank-sum test
+    p_wilcox = wilcox.test(Distance[Group == "Downregulated"], 
+                           Distance[Group == "Random Down"], 
+                           alternative = "two.sided")$p.value,
+    
+    # Kolmogorov-Smirnov test
+    p_ks = ks.test(Distance[Group == "Downregulated"], 
+                   Distance[Group == "Random Down"])$p.value,
+    
+
+    # Median of observed distances (upregulated) and random distances
+    median_observed = median(Distance[Group == "Downregulated"]),
+    median_random = median(Distance[Group == "Random Down"]),
+    # Proportion of the difference: (observed - random) / random
+    prop_diff = (median_observed - median_random) / median_random
+  ) %>% 
+  filter(ToPlot != ".")
+
+# Adjust p-values for multiple testing (optional)
+summary_stats_primed <- summary_stats_primed %>%
+  mutate(
+    p_wilcox_adj = p.adjust(p_wilcox, method = "fdr"),
+    p_ks_adj = p.adjust(p_ks, method = "fdr")) %>% 
+  select("TE subfamilies"  = 1, "p Wilcoxon" = 2, "p Wilcoxon FDR" = 7, "p Kolmogorov Smirnov" = 3, "p Kolmogorov Smirnov FDR" = 8, "Observed median distances" = 4, "Random median distances" = 5, "Proportion of difference" = 6) %>% 
+  dplyr::slice(-41) 
+
+# Display the summary statistics
+summary_stats_primed 
+```
+#### Plots with stats
+```{r, fig.width = 12, fig.height = 8, warning=FALSE}
+# Merge the stats with the full dataset
+fullDataFrameDownregulated_merged <- fullDataFrameDownregulated[fullDataFrameDownregulated$ToPlot %in% topPathwaysOrderedLog2FC, ] %>%
+  left_join(summary_stats_primed, by = c("ToPlot" = "TE subfamilies"))
+
+# Mark the significant subfamilies and add arrow direction
+fullDataFrameDownregulated_merged <- fullDataFrameDownregulated_merged %>%
+  group_by(ToPlot) %>%
+  mutate(
+    is_significant = ifelse(`p Wilcoxon FDR` < 0.001 & abs(`Proportion of difference`) > 0.10, TRUE, FALSE),
+    # Set the y-position for all asterisks at the bottom
+    asterisk_y = ifelse(is_significant, -0.5, NA),
+    # Determine arrowhead direction: up for increased distance, down for decreased
+    arrow_label = ifelse(`Proportion of difference` > 0, "▲", ifelse(`Proportion of difference` < 0, "▼", ""))
+  )
+
+# Plot
+ggplot(data = fullDataFrameDownregulated %>% filter(ToPlot %in% topPathwaysOrderedLog2FC), 
+       aes(x = ToPlot, y = log10(abs(Distance)), fill = Group)) +
+  
+  # Add rectangles to separate the naive and primed subfamilies
+  annotate("rect", xmin = 0.5, xmax = split_point + 0.5, ymin = -Inf, ymax = Inf, fill = "#0072B2", alpha = 0.05) +
+  annotate("rect", xmin = split_point + 0.5, xmax = Inf, ymin = -Inf, ymax = Inf, fill = "#D55E00", alpha = 0.05) +
+
+  # Add a vertical dashed line at the split point
+  geom_vline(xintercept = split_point + 0.5, linetype = "dotted", color = "black", size = 0.5) +
+
+  # Annotate for Naive and Primed subfamilies
+  annotate("text", x = 1, y = Inf, label = "Naive subfamilies", vjust = 1.5, hjust = 0, fontface = "italic", size = 5, color = "black") +
+  annotate("text", x = num_subfamilies, y = Inf, label = "Primed subfamilies", vjust = 1.5, hjust = 1, fontface = "italic", size = 5, color = "black") +
+  
+  # Violin plot with proper fill for the legend
+  introdataviz::geom_split_violin(alpha = .6, 
+                                  trim = FALSE,
+                                  color = "black") +
+  
+  # Crossbar for median without adding to legend
+  stat_summary(fun = median, 
+               geom = "crossbar", 
+               position = position_dodge(.6), 
+               size = 0.5,
+               color = "darkred",   # Color of median line
+               width = 0.5, show.legend = FALSE) +  # Ensure crossbar doesn't show in legend
+  
+  # Improve aesthetics for fill colors and update the label for 'Downregulated Naive'
+  scale_fill_manual(values = c("Downregulated" = "orangered", "Random Down" = "gray60"),
+                    labels = c("Downregulated" = "Upregulated primed", "Random Down" = "Random Genes")) +
+  scale_color_manual(values = c("Downregulated" = "orangered", "Random Down" = "gray60"), guide = "none") +
+  
+  # Titles and labels
+  labs(title = "TE Subfamily Distance to Gene Start\nUpregulated Primed Vs. Random Genes",
+       subtitle = "Median distances to selected TE subfamilies (padj < 0.001 & Proportion of Difference > 15%)",
+       y = "log10(Distance to gene start)",
+       x = "") +
+  
+  # Adjust the x-axis text and its rotation
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) +
+  
+  # Fix legend to show only violin fill and no extra geoms
+  guides(fill = guide_legend(override.aes = list(color = NA))) +  # Remove borders in legend
+  
+  # Add asterisks for significant subfamilies at the bottom of the plot
+  geom_text(data = fullDataFrameDownregulated_merged %>% select(ToPlot, Group, is_significant, asterisk_y) %>% distinct(),
+            aes(x = ToPlot, y = asterisk_y, label = ifelse(is_significant, "*", "")),
+            color = "darkred", size = 8, vjust = 1.5, na.rm = TRUE) +  # Larger size for asterisks
+  
+  # Add arrowheads to the right of the asterisks (slightly shifted right using arrow_x)
+  geom_text(data = fullDataFrameDownregulated_merged %>% select(ToPlot, Group, is_significant, asterisk_y, arrow_label) %>% distinct(),
+            aes(x = ToPlot, y = asterisk_y, label = arrow_label),
+            color = "darkred", size = 4, vjust = 0.5, na.rm = TRUE) +  # Smaller size for arrowheads
+  
+  # Adjust the theme for improved readability
+  theme_minimal() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 12, hjust = 0.5),
+        axis.title.y = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10),
+        legend.position = c(0.9, 1.07),  # Adjusted legend position
+        legend.box.background = element_rect(fill = "transparent", 
+                                             size = 0.6, 
+                                             linetype = "dotted", 
+                                             colour ="black"),
+        legend.spacing.y = unit(0, "cm"),
+        legend.title = element_blank())
+```
+
+
+
+### Permutation Tests
+```{r}
+test_upregulated_greaterDistance <- permTestDistances(A = genesUp,  
+                    B = rmsk[rmsk$subfamily %in% topPathways, ], 
+                    ntimes = 1000, 
+                    randomize.function = randomSamplingGenes, 
+                    evaluate.function = calcDistances,
+                    genes = genesUniverse,
+                    alternative = "greater")
+```
+```{r}
+#saveRDS(test_upregulated_greaterDistance, file = "analysis/results/PermTests_test_upregulated_greaterDistance.RDS")
+#test_upregulated_greaterDistance <- readRDS("/mnt/scratch/home/miguel/Data/H9hESCs/analysis/results/PermTests_test_upregulated_greaterDistance.RDS")
+```
+
+```{r}
+test_upregulated_lowerDistance <- permTestDistances(A = genesUp,  
+                    B = rmsk[rmsk$subfamily %in% topPathways, ], 
+                    ntimes = 1000, 
+                    randomize.function = randomSamplingGenes, 
+                    evaluate.function = calcDistances,
+                    genes = genesUniverse,
+                    alternative = "less")
+```
+```{r}
+#saveRDS(test_upregulated_lowerDistance, file = "analysis/results/PermTests_test_upregulated_lowerDistance.rds")
+# test_upregulated_lowerDistance <- readRDS("/mnt/scratch/home/miguel/Data/H9hESCs/analysis/results/PermTests_test_upregulated_lowerDistance.rds")
+```
+We now move to downregulated genes. We start by checking the enrichment of subfamilies in the promoters of downregulated genes.
+```{r}
+test_downregulated_greaterDistance <- permTestDistances(A = genesDown,  
+                    B = rmsk[rmsk$subfamily %in% topPathways, ], 
+                    ntimes = 1000, 
+                    randomize.function = randomSamplingGenes, 
+                    evaluate.function = calcDistances,
+                    genes = genesUniverse,
+                    alternative = "greater")
+```
+```{r}
+#saveRDS(test_downregulated_greaterDistance, file = "analysis/results/PermTests_test_downregulated_greaterDistance.rds")
+#test_downregulated_greaterDistance <- readRDS("/mnt/scratch/home/miguel/Data/H9hESCs/analysis/results/PermTests_test_downregulated_greaterDistance.rds")
+```
+And finally, we test the depletion of TE subfamilies from the promoters of downregulated genes.
+```{r}
+test_downregulated_lowerDistance <- permTestDistances(A = genesDown,  
+                    B = rmsk[rmsk$subfamily %in% topPathways, ], 
+                    ntimes = 1000, 
+                    randomize.function = randomSamplingGenes, 
+                    evaluate.function = calcDistances,
+                    genes = genesUniverse,
+                    alternative = "less")
+```
+```{r}
+#saveRDS(test_downregulated_lowerDistance, file = "analysis/results/PermTests_test_downregulated_lowerDistance.rds")
+#test_downregulated_lowerDistance <- readRDS("/mnt/scratch/home/miguel/Data/H9hESCs/analysis/results/PermTests_test_downregulated_lowerDistance.rds")
+```
+#### Using boxplots for the permutations.
+```{r, fig.width=12, message=F, warning = F, results = F}
+orderedTEDistanceGraphBoxplots(test = test_upregulated_lowerDistance, 
+            TEs = topPathwaysOrderedLog2FC, 
+            typeGenes =  "Upregulated genes", 
+            title = "Median distances between TE subfamilies and gene start\n1000 permutations - Boxplots\nUpregulated Genes - Lower distance", 
+            legendPos = c(0.93, 1.09))
+```
+```{r, fig.width=12, message=F, warning = F, results = F}
+orderedTEDistanceGraphBoxplots(test = test_upregulated_greaterDistance, 
+            TEs = topPathwaysOrderedLog2FC, 
+            typeGenes =  "Upregulated genes", 
+            title = "Median distances between TE subfamilies and gene start\n1000 permutations - Boxplots\nUpregulated Genes - Higher distance", 
+            legendPos = c(0.93, 1.09))
+```
+```{r, fig.width=12, message=F, warning = F, results = F}
+orderedTEDistanceGraphBoxplots(test = test_downregulated_lowerDistance, 
+            TEs = topPathwaysOrderedLog2FC, 
+            typeGenes =  "Downregulated genes", 
+            title = "Median distances between TE subfamilies and gene start\n1000 permutations - Boxplots\nDownregulated Genes - Lower distance", 
+            legendPos = c(0.93, 1.09))
+```
+```{r, fig.width=12, message=F, warning = F, results = F}
+orderedTEDistanceGraphBoxplots(test = test_downregulated_greaterDistance, 
+            TEs = topPathwaysOrderedLog2FC, 
+            typeGenes =  "Downregulated genes", 
+            title = "Median distances between TE subfamilies and gene start\n1000 permutations - Boxplots\nDownregulated Genes - Higher distance", 
+            legendPos = c(0.93, 1.09))
+```

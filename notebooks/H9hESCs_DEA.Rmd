@@ -1,0 +1,2296 @@
+---
+title: 'HESCs - primed Vs. Naive (and XACT WT Vs. Mutant)'
+author: 
+  - name: "Miguel Casanova^[Disease Transcriptomics Group, Instituto de Medicina Molecular, Faculdade de Medicina da Universidade de Lisboa]"
+    email: mcasanova@medicina.ulisboa.pt
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_notebook:
+    code_folding: hide
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/Data/H9hESCs/")
+```
+
+# {.tabset .tabset-pills}
+
+This notebook was made for the analysis of the RNAseq datasets from primed and naive H9 hESCs (XACT WT and XACT KO)
+
+## Data pre-processing {.tabset .tabset-pills}
+
+Let's start by loading the libraries we will need for the analysis
+
+```{r, warning=FALSE, results='hide',message=FALSE}
+suppressPackageStartupMessages(library("pheatmap"))
+suppressPackageStartupMessages(library("reshape2"))
+suppressPackageStartupMessages(library("ggplot2"))
+suppressPackageStartupMessages(library("RColorBrewer"))
+suppressPackageStartupMessages(library ("magrittr"))
+suppressPackageStartupMessages(library("vsn"))
+#suppressPackageStartupMessages(library("NMF"))
+#suppressPackageStartupMessages(library("grDevices"))
+suppressPackageStartupMessages(library("ggrepel"))
+suppressPackageStartupMessages(library("data.table"))
+suppressPackageStartupMessages(library("tidyverse"))
+suppressPackageStartupMessages(library("dplyr"))
+suppressPackageStartupMessages(library("tibble"))
+#suppressPackageStartupMessages(library("plyr"))
+suppressPackageStartupMessages(library("ggvenn"))
+suppressPackageStartupMessages(library("eulerr"))
+suppressPackageStartupMessages(library("UpSetR"))
+suppressPackageStartupMessages(library("ggpubr"))
+suppressPackageStartupMessages(library("PCAtools"))
+#suppressPackageStartupMessages(library("limma"))
+#suppressPackageStartupMessages(library("edgeR"))
+suppressPackageStartupMessages(library("DESeq2"))
+# suppressPackageStartupMessages(library("EDASeq"))
+# suppressPackageStartupMessages(library("biomaRt"))
+# suppressPackageStartupMessages(library("baySeq"))
+suppressPackageStartupMessages(library("clusterProfiler"))
+suppressPackageStartupMessages(library("enrichplot"))
+suppressPackageStartupMessages(library("org.Hs.eg.db"))
+suppressPackageStartupMessages(library("fgsea"))
+```
+
+### Preparing the counts table and gene annotations
+```{r}
+# Load relevant datafiles and metadata (in this case, I create a matrix)
+#countData <- read.table(file = "TeissandierUnique_genes_gencode.counts", header = T, sep = "\t")
+countData <- fread(file = "analysis/featureCounts/TeissandierMulti/TeissandierMulti_genes_gencode_all_rmsk_perFamily.counts", header = T, sep = "\t", data.table = FALSE)
+row.names(countData) = countData$Geneid # Give the Geneid as the row.names for the table.
+
+# Remove all the columns that don't have counts
+countData_simple <- countData[ , -c(1:6)]
+
+# Change the names for something a little bit more inteligible.
+names(countData_simple) <- c("H9_primed_WT1", "H9_primed_WT2", "H9_primed_WT3",
+                            "H9_primed_KO1", "H9_primed_KO2", "H9_primed_KO3", 
+                            "H9_naive_WT1", "H9_naive_WT2", "H9_naive_WT3", 
+                            "H9_naive_KO1", "H9_naive_KO2", "H9_naive_KO3")
+```
+Let's check how our processed table looks like.
+```{r}
+head(countData_simple, 10)
+```
+There are lots of genes with almost no reads. There are several ways to remove genes with low reads,
+that are statistically not robust to give confident DE results.
+One of the ways of filtering, is simply getting rid of the genes that, across all samples, do not have at least 100 reads mapped.
+We could consider increasing this number, as this is rather low.
+```{r}
+#countData_simple <- countData_simple[rowSums(countData_simple) > 100, ]
+#countData_simple <- countData_simple[rowSums(countData_simple > 10) >= 6, ]
+countData_simple <- countData_simple[rowSums(countData_simple > 10) >= 6 & rowSums(countData_simple) > 100, ]
+head(countData_simple, 10)
+#View(countData_simple)
+```
+In case we want to make the analysis only with genes or TEs, we can subset the count table using the following code.
+```{r}
+# countData_simple_genes <- countData_simple[!grepl("TE_",rownames(countData_simple)), ]
+# countData_simple_TEs <- countData_simple[grepl("TE_",rownames(countData_simple)), ]
+# countData_simple <- countData_simple_TEs
+```
+```{r}
+cat("We have", nrow(countData_simple[!grepl("TE_",rownames(countData_simple)), ]), "genes after filtering.")
+```
+
+
+```{r}
+cat("We have", nrow(countData_simple[grepl("TE_",rownames(countData_simple)), ]), "TE subfamilies after filtering.")
+```
+
+**The samples we have are:**
+
+* __H9 Primed cells__
+  + H9_primed_WT1
+  + H9_primed_WT2
+  + H9_primed_WT3
+  + H9_primed_KO1
+  + H9_primed_KO2
+  + H9_primed_KO3
+  
+* __H9 Naive cells__
+  + H9_naive_WT1
+  + H9_naive_WT2
+  + H9_naive_WT3
+  + H9_naive_KO1
+  + H9_naive_KO2
+  + H9_naive_KO3
+
+For this analysis, we are going to focus on the differences between primed and naive H9 hESCs. We could drop the KO samples, but in fact, the KO contributes very little to the gene exoression changes between all samples. As such, it's not necessary to remove the samples.
+
+### Drop unwanted samples
+In any case, if required, the code to remove the samples is the following:
+```{r}
+# drop <- c("H9_primed_KO1", "H9_primed_KO2", "H9_primed_KO3",
+# "H9_naive_KO1", "H9_naive_KO2", "H9_naive_KO3")
+# countData_simple <- countData_simple[,!(names(countData_simple) %in% drop)]
+# head(countData_simple, 20)
+```
+
+### Creating a metadata table for the hESCs
+We next load the metadata information.
+```{r}
+# sample_info <- fread(file ="~/Data/H9hESCs/OriginalData/Metadata.txt", header = T, sep = "\t")
+
+# Next, create a data frame with information about each sample, genotype and state (naive or primed)
+sample_info <- data.frame(genotype = c("WT", "WT", "WT", "KO", "KO", "KO", "WT", "WT", "WT", "KO", "KO", "KO"),
+                         state = c("primed", "primed", "primed", "primed", "primed", "primed", "naive", "naive", "naive", "naive", "naive", "naive"), row.names = names(countData_simple))
+# Add a column named condition, that fuses the state and genotype, to use for the DSeq2 model.
+sample_info$condition <- paste(sample_info$state, sample_info$genotype, sep = "_")
+
+# Check the metadata information-
+sample_info
+```
+In case we want to create subsets with primed and naive cells, we can use the following code:
+```{r}
+# To create a primed or naive dataset (run one of the following two lines):
+# sample_info <- subset(sample_info, sample_info$state == "primed") # Select primed samples
+# sample_info <- subset(sample_info, sample_info$state == "naive") # Select naive samples
+# countData_simple <- countData_simple[, colnames(countData_simple) %in% row.names(sample_info)]
+ 
+# head(sample_info, 10)
+# head(countData_simple, 10)
+```
+We next have to define the factors that will be used for the model for DEA. We have several factors that can be used for DEA: `genotype`, `state` and `condition`. The following columns of the metadata table need to be transformed to factors and ordered. 
+```{r}
+sample_info$state <- factor(sample_info$state)
+sample_info$genotype <- factor(sample_info$genotype)
+sample_info$condition <- factor(sample_info$condition)
+
+str(sample_info$state)
+str(sample_info$genotype)
+str(sample_info$condition)
+```
+Levels in a factor are ordered alphanumerically by default, but re-specification of the reference can be carried out using the `relevel` function in the stats package. This is important to determine the order of the comparison, in DEA. This is not absolutely required. We can always get the information about it later, through contrast matrices.
+```{r}
+sample_info$state <- relevel(sample_info$state, "primed", "naive")
+sample_info$genotype <- relevel(sample_info$genotype, "WT", "KO")
+sample_info$condition <- relevel(sample_info$condition, "primed_WT", "primed_KO", "naive_WT", "naive_KO")
+```
+
+## Quality assessment of the libraries and pre-processing
+Let's start by checking the overall quality of the libraries. Given the discrepancies in count number between genes, a log2 transformation is required to allow better visualization of the results. 
+```{r, fig.width=12}
+# Let's start by applying a log2-transform to the countdata.
+countData_simple_log2 <- log2(countData_simple + 1)
+
+
+par(mfrow =c(2 ,1))
+# Boxplot of non-transformed read counts (one per sample)
+boxplot (countData_simple, notch = FALSE,
+         main = "untransformed read counts",
+         ylab = "read counts",
+         cex.axis = .6)
+# Boxplot of log2 transformed read counts (one per sample)
+boxplot (countData_simple_log2, notch = FALSE,
+         main = "log2 - transformed read counts",
+         ylab = "log2 ( read counts )",
+         cex.axis = .6)
+```
+### Plotting on ggplot
+Let's see how the raw read counts per gene, distribute across the different samples, using boxplots.
+```{r, fig.height=6, fig.width=7}
+# Boxplot of log2 read counts for all samples
+countData_simple_log2 <- as.data.frame(countData_simple_log2)
+df_raw <- reshape2::melt(countData_simple_log2, variable.name = "Samples", value.name = "count") #melt reshapes the matrix
+# Create a column with the state and genotype information for the different samples.
+df_raw$Condition <- ifelse(grepl("H9_primed_WT", df_raw$Samples), "H9 Primed WT",
+                           ifelse(grepl("H9_primed_KO", df_raw$Samples), "H9 Primed KO",
+                                  ifelse(grepl("H9_naive_WT", df_raw$Samples), "H9 Naive WT",
+                                         "H9 Naive KO")))
+df_raw$Condition <- factor(df_raw$Condition, levels = c("H9 Primed WT", "H9 Primed KO", "H9 Naive WT", "H9 Naive KO"))
+
+plot <- ggplot(df_raw, aes(x = Samples, y = count, fill = Condition)) + 
+  geom_point(position = "jitter", alpha = 0.1, size = 0.3, aes(color = Condition)) + 
+  geom_boxplot(fill = NA) +
+  labs(title = "Distribution of raw read counts per gene", 
+       y = expression(log[2](count+1)), 
+       x = "", 
+       caption = "Plots showing number of log2 reads per gene, for each library") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(size=4, alpha = 0.8))) +
+  theme(plot.title = element_text(size = 16,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = "bottom")
+
+# Save and plot the graph
+# ggsave(plot , file = paste("~/Data/H9hESCs/analysis/results", "rawReads_boxplots",".tiff", sep = ""), width = 24.45, height = 17.78, units = "cm", dpi=300)
+plot
+```
+We can also visualise this, using violin plots, that give a better idea of the distribution of the gene counts on the samples.
+```{r, fig.height=6, fig.width=7}
+plot <- ggplot(df_raw, aes(x = Samples, y = count, fill = Condition)) +
+  geom_point(position = "jitter", size = .1, alpha = 0.1, aes(color = Condition)) +
+  geom_violin(alpha = 0.2, trim = F, size = .3) +
+  geom_boxplot(width = 0.2, fill = "white", alpha = .6) +
+  labs(title = "Distribution of raw read counts per gene", 
+       y = expression(log[2](count+1)), 
+       x = "", 
+       caption = "Plots showing number of log2 reads per gene, for each library") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(alpha=1))) +
+  theme(plot.title = element_text(size = 16,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = "bottom")
+
+# ggsave(plot , file = paste("~/Data/H9hESCs/analysis/results", "rawReads_violin_boxplots",".tiff", sep = ""), width = 24.45, height = 17.78, units = "cm", dpi=300)
+plot
+```
+To have a clearer idea about the distribution of reads on the different samples, we can visualize the counts with density plots. This gives us the density of genes with a given number of counts, across the sample.
+```{r, fig.width=6,fig.height=7}
+# Let's also visualize the count distribution in density plots
+plot <- ggplot(df_raw, aes(x = count, colour = Samples, fill = Samples)) +
+  theme_bw() +
+  #ylim(c(0,0.17)) +
+  geom_density(alpha = 0.2, size = 0.5) +
+  facet_wrap(~ Samples, ncol = 3) +
+  theme(legend.position = "top") +
+  xlab(expression(log[2](count + 1)))
+
+plot
+```
+The same can be represented with histograms.
+```{r, fig.width=6,fig.height=7}
+ggplot(df_raw, aes(x = count, colour = Samples, fill = Samples)) +
+  theme_bw() +
+  geom_histogram(alpha = 0.2, size = 0.5, bins = 50) +
+  #geom_density(alpha = 0.2, size = 0.5) +
+  facet_wrap(~ Samples, ncol = 3) +
+  theme(legend.position = "top") +
+  xlab(expression(log[2](count + 1)))
+```
+
+### Investigating systematic bias in samples
+A systematic bias in the samples, such as a sample being sequenced more deeply, should be investigated. For this, the raw, log2 transformed read counts, should be used.
+```{r}
+par(mfrow = c(1, 1))
+plot(countData_simple_log2[ , 1], countData_simple_log2[ ,5], 
+     pch = 20, # pch specified the type of symbols. 20 is filled dots.
+     xlab = colnames(countData_simple_log2[1]), 
+     ylab= colnames(countData_simple_log2[4])) +
+  abline(0, 1, col = "red")
+```
+The gene counts between the two samples are quite similar. But in any case, it's often important to normalize the different datasets. Specially, when the different datesets have a different sequencing depth. This is because more reads are going to give you a higher gene count, without actually meaning that a specific gene has more counts coming from it.
+```{r}
+x <- countData_simple_log2[, 1] # Extract first column
+y <- countData_simple_log2[, 7] # Extract the fourth column
+M <- x - y # M-values (differences between samples)
+A <- (x + y)/2 # A-values (averages)
+dfAM <- data.frame(A, M)
+
+ggplot(dfAM, aes(x = A, y = M)) +
+  geom_point(size = 1.5, alpha = 1/5) +
+  geom_hline(aes(yintercept = 0), color = "blue3") +
+  stat_smooth(se = FALSE, method = "loess", color = "red3") +
+  xlab("Average gene count") +
+  ylab("Count difference") +
+  ggtitle("H9 Primed WT_1 vs. H9 Naive WT_1")
+```
+***
+
+## Experimental Design
+
+Different algorithms use different normalization strategies. Basically, these mostly assume that the majority of the genes are not differentially expressed. As such, the algorithms will try to equalize the number of reads from the majority of the genes (theoretically, those that are not differentially expressed).
+
+For the DESeq2 normalization, let's start by creating the DESeq2 object for all further analysis. What you put on the design matrix is very important. You need to know exactly what effect each feature has on the data. Also, you need to be careful with not overfitting your design matrix, into the specificity of your data. As you provide more variables, you increase the risk of overfitting.
+
+### What we want to test?
+
+There are a few questions we may want to answer, using our dataset:
+
+**1. How does the pluripotent state (naive Vs. primed) influences gene expression of hESCs?**\
+**2. How does the genotype (XACT KO Vs. XACT WT) influences gene expression of of primed Vs. naive hESCs?**\
+**3. How does the genotype influences the pluripotency state of hESCs?**
+
+After lengthy consideration, I decided to use an experimental design that takes the interaction between state (naive and primed) and genotype (WT and KO). 
+### Using a model with interaction
+We have two factors of interest, `genotype` and `state`, and we want to model both with an interaction. This means that we are assuming that pluripotency state might respond differently to the genotype of the cells.
+```{r}
+dds_interaction <- DESeqDataSetFromMatrix(countData = countData_simple,
+                              colData = sample_info,
+                              design = ~ 1 + genotype + state + genotype:state) 
+# In this case, we use an intercept, that corresponds to the baseline.
+# This is given by `~`, which is the same as using `~ 1`
+# Instead of using the `~ 1` (intercept), we could also use `~ 0`, which doesn't take the intercept and gives us the coefficients
+# for all different groups
+
+dds_interaction <- DESeq(dds_interaction)
+resultsNames(dds_interaction)
+```
+**Because we have two factors and an interaction, we can define quite a number of comparisons, using a design matrix**
+```{r}
+# Get the model matrix
+modMat_interaction <- model.matrix(design(dds_interaction), colData(dds_interaction))
+modMat_interaction
+
+naive_WT <- colMeans(modMat_interaction[dds_interaction$state == "naive" & dds_interaction$genotype == "WT", ])
+naive_KO <- colMeans(modMat_interaction[dds_interaction$state == "naive" & dds_interaction$genotype == "KO", ])
+primed_WT <- colMeans(modMat_interaction[dds_interaction$state == "primed" & dds_interaction$genotype == "WT", ])
+primed_KO <- colMeans(modMat_interaction[dds_interaction$state == "primed" & dds_interaction$genotype == "KO", ])
+
+primed <- colMeans(modMat_interaction[dds_interaction$state %in% c("primed"),])
+naive <- colMeans(modMat_interaction[dds_interaction$state %in% c("naive"),])
+```
+We can now define any contrast of interest from these vectors.
+
+**Naive (all) Vs Primed (all))_using name:**
+```{r}
+res_genotype_state_naiveVsPrimed_interaction_name <- results(dds_interaction, independentFiltering = TRUE, name = "state_naive_vs_primed")
+
+summary(res_genotype_state_naiveVsPrimed_interaction_name)
+```
+
+**Naive (all) Vs Primed (all))_using contrasts previously defined in matrix:**
+We could use the contrasts defined in the matrix. Unlike using the results name `state_naive_vs_primed`, using this contrast will consider all primed Vs. Naive samples. The previous strategy, considers the differences between the baselines, this is, primed WT Vs. Naive WT.
+```{r}
+res_genotype_state_naiveVsPrimed_interaction <- results(dds_interaction, independentFiltering = TRUE, contrast = naive - primed)
+# res_genotype_state_naiveVsPrimed_interaction <- results(dds_interaction, independentFiltering = TRUE, name = "state_primed_vs_naive")
+
+summary(res_genotype_state_naiveVsPrimed_interaction)
+```
+We can check the correlation of the log2FoldChange statistics for each gene, using the two methods.
+```{r}
+plot(res_genotype_state_naiveVsPrimed_interaction_name$log2FoldChange, res_genotype_state_naiveVsPrimed_interaction$log2FoldChange)
+```
+As we can see, although the results are not identical, there is a very good correlation.
+
+**XACT KO Vs XACT WT - primed**
+```{r}
+res_primed_KOVsWT <- results(dds_interaction, independentFiltering = TRUE, contrast = primed_KO - primed_WT)
+summary(res_primed_KOVsWT)
+```
+**XACT KO Vs XACT WT - naive**
+```{r}
+res_naive_KOVsWT <- results(dds_interaction, independentFiltering = TRUE, contrast = naive_KO - naive_WT)
+summary(res_naive_KOVsWT)
+```
+**Naive Vs Primed - XACT WT**
+```{r}
+res_XACT_WT_naiveVsPrimed <- results(dds_interaction, independentFiltering = TRUE, contrast = naive_WT - primed_WT)
+
+summary(res_XACT_WT_naiveVsPrimed)
+```
+This actually gives exactly the same as the `state_naive_vs_primed`.
+**Naive Vs Primed - XACT KO**
+```{r}
+res_XACT_KO_naiveVsPrimed <- results(dds_interaction, independentFiltering = TRUE, contrast = naive_KO - primed_KO)
+summary(res_XACT_KO_naiveVsPrimed)
+```
+**Interaction between pluripotency state and genotype (i.e. do primed and naive respond differently to XACT KO?):**
+```{r}
+res_interaction <- results(dds_interaction, independentFiltering = TRUE,
+                contrast = (naive_KO - naive_WT) - (primed_KO - primed_WT))
+summary(res_interaction)
+```
+Let's check how the DESeq2 object we created, looks like. First we check the column data.
+```{r}
+dds <- dds_interaction 
+
+# Doublecheck if the dataset is correct. 
+colData (dds) %>% head                        
+```
+We then check the counts data.
+```{r}
+assay (dds, "counts") %>% head
+```
+And finaly, the rowdata, this is, the gene centric information.
+```{r}
+rowData (dds) %>% head
+```
+Let's check the library sizes of the different samples
+```{r}
+colSums(counts(dds))/1e6
+```
+Let's have a look at the normalized read counts and the count distribution, after normalization.
+``` {r} 
+countsDESeq2Norm <- counts(dds, normalized = TRUE) # Extract normalized counts
+countsDESeq2NormLog2 <- log2(countsDESeq2Norm + 1) # Convert to log2-scale for visualization, as we did before.
+```
+Let's use ggplot for this.
+```{r, fig.height=6, fig.width=7}
+# ggplot2 uses dataframes, for ploting. Let's prepare the dataframe for efficient plotting:
+df_DESeq2 <- reshape2::melt(as.data.frame(countsDESeq2NormLog2), variable.name = "Samples", value.name = "count") #melt reshapes the matrix
+# Create a column with the "ASD" and "CT" information for the different samples.
+df_DESeq2$Condition <- ifelse(grepl("H9_primed_WT", df_DESeq2$Samples), "H9 Primed WT",
+                              ifelse(grepl("H9_primed_KO", df_DESeq2$Samples), "H9 Primed KO",
+                                     ifelse(grepl("H9_naive_WT", df_DESeq2$Samples), "H9 Naive WT",
+                                            "H9 Naive KO")))
+df_DESeq2$Condition <- factor(df_raw$Condition, levels = c("H9 Primed WT", "H9 Primed KO", "H9 Naive WT", "H9 Naive KO"))
+
+plot <- ggplot(df_DESeq2, aes(x = Samples, y = count, fill = Condition)) + 
+  geom_point(position = "jitter", alpha = 0.1, size = 0.3, aes(color = Condition)) + 
+  geom_boxplot(fill = NA) +
+  labs(title = "Distribution of normalized read counts per gene", 
+       y = expression(log[2](count+1)), 
+       x = "", 
+       caption = "Plots showing number of log2 reads per gene, for each library") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(size=4, alpha = 0.8))) +
+  theme(plot.title = element_text(size = 16,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = "bottom")
+
+# Save and plot the graph
+# ggsave(plot , file = paste("~/Data/H9hESCs/analysis/results", "normalizedReads_boxplots",".tiff", sep = ""), width = 24.45, height = 17.78, units = "cm", dpi=300)
+plot
+```
+We can also check the normalization, using violin plots.
+```{r, fig.height=6, fig.width=7}
+plot <- ggplot(df_DESeq2, aes(x = Samples, y = count, fill = Condition)) +
+  geom_point(position = "jitter", size = .1, alpha = 0.1, aes(color = Condition)) +
+  geom_violin(alpha = 0.2, trim = F, size = .3) +
+  geom_boxplot(width = 0.2, fill = "white", alpha = .6) +
+  labs(title = "Distribution of normalized read counts per gene", 
+       y = expression(log[2](count+1)), 
+       x = "", 
+       caption = "Plots showing number of log2 reads per gene, for each library") +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(alpha=1))) +
+  theme(plot.title = element_text(size = 16,
+                                  face = "bold",
+                                  hjust = 0.5,
+                                  lineheight = 1.2),
+        plot.caption = element_text(size = 12),
+        axis.text.x = element_text(size = 10,
+                                   angle = 45,
+                                   colour = 'black', 
+                                   hjust = 1),
+        axis.title.y = element_text(size = 12),
+        axis.text.y = element_text(size = 10,
+                                   colour = "black"),
+        legend.position = "bottom")
+
+# Save and plot the graph
+# ggsave(plot , file = paste("~/Data/H9hESCs/analysis/results", "normalizedReads_violin_boxplots",".tiff", sep = ""), width = 24.45, height = 17.78, units = "cm", dpi=300)
+plot
+```
+### Testing Normalization
+Let's start by checking the homoskedasticity of the samples (if all variables have similar variance), by plotting mean vs standard deviation.
+```{r}
+msd_plot <- meanSdPlot(countsDESeq2NormLog2, ranks = FALSE, plot = FALSE)
+msd_plot$gg +
+  ggtitle("Sequencing depth normalized log2(read counts)") +
+  ylab("standard deviation")
+```
+The bump on the left side indicates that the variance is higher between samples, for genes with a lower read count.
+This means that there is a dependance of the variance on the mean read count, which suggests heteroskedasticity.
+To compensate for this, one should proceed with normalization of the read counts.
+
+**Stabilize variance across the mean using rlog transformation. This should be done to cluster samples, make PCA, etc...**\
+To reduce the amount of heteroskedasticity, we need to transform the values, by using the DESeq2 rlog() function.
+You start by applying the rlog transformation on the DESeq dataset.
+```{r}
+rlogdds <- rlogTransformation(dds) # If the different condition lead to strong differences, use blind = FALSE, so that the dispersion is not overestimated.
+```
+Observe the effects of the rlog transformation on the count data 
+
+```{r}
+par(mfrow = c(1, 2))
+# Simply plot the log2 count reads from samples 1 and 2
+plot(log2(1 + counts(dds)[ , c(1,5)]),
+     pch=16, cex=0.3, main="log2")
+# Now plot the rlog transformed counts, using the assay function (necessary as the rlogdds is a different kind of object, a DESeqTransform, to be more precise)
+plot(assay(rlogdds)[ ,  c(1,5)],
+     pch=16, cex=0.3, main="rlog")
+```
+Check the effect of the rlog transformation on the homoskedasticity
+```{r}
+msd_plot_rlog <- meanSdPlot(assay(rlogdds), ranks = FALSE, plot = FALSE)
+msd_plot_rlog$gg +
+  ggtitle("rlog-transformed read counts") +
+  ylab("standard deviation")
+```
+As we can observe, the rlog dramatically reduces the heteroskedasticity of the dataset.
+
+***
+
+## Visualization of data {.tabset .tabset-pills}
+Let's now use several visualization techniques, to start exploring the data and how the samples organize between themselves, without any *a priori* information.
+
+### Clustering sample-to-sample distances
+**Let's start by clustering samples based on their euclidean distances.**
+```{r, fig.height=7, fig.width=8}
+distances_rlogdds <- dist(t(assay(rlogdds)), method = "euclidean") # calculate distances using transformed and normalized counts
+distance_rlogdds_matrix <- as.matrix(distances_rlogdds) # convert to matrix
+rownames(distance_rlogdds_matrix) = colnames(distance_rlogdds_matrix) = with(colData(dds), paste(rownames(colData(dds)))) # set row names in the matrix
+colnames(distance_rlogdds_matrix) <- NULL # remove column names in the matrix
+
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")) )(225) # Set colors
+clustering_multimapped_plot <- pheatmap(distance_rlogdds_matrix,
+         #clustering_distance_rows = distances_rlogdds,
+         #clustering_distance_cols = distances_rlogdds,
+         #annotation_col = annotation_dataframe,
+         clustering_method = "ward.D2",
+         col = colors,
+         fontsize = 14,
+         fontsize_row = 12,
+         fontsize_col = 12)
+
+# ggsave(plot , file = paste("~/Data/Angelman/20220317_Organoids/analysis/results/", "clustering_euclideanDist",".tiff", sep = ""), width = 24.45, height = 17.78, units = "cm", dpi=300)
+clustering_multimapped_plot
+```
+**Next, we will cluster samples by pearson correlation**\
+Correlation allows eliminating problems with "offset" of certain genes.
+```{r, fig.height=7, fig.width=8}
+cols.cor <- cor(assay(rlogdds), use = "pairwise.complete.obs", method = "pearson")
+
+rownames(cols.cor) = colnames(cols.cor) = with(colData(dds), paste(colnames(rlogdds))) # set row names in the matrix
+colnames(cols.cor) = NULL # remove column names in the matrix
+
+colors <- colorRampPalette(rev(brewer.pal(9, "Greens")) )(225) # Set colors
+plot <- pheatmap(cols.cor, scalre = "row",
+         clustering_distance_rows = as.dist(1- cols.cor),
+         clustering_distance_cols = as.dist(1-cols.cor),
+         clustering_method = "ward.D2",
+         col = colors)
+
+# Let's save the plot
+# ggsave(plot , file = paste("~/Data/Angelman/20220317_Organoids/analysis/results/", "clustering_pearsonCorrelation",".tiff", sep = ""), width = 24.45, height = 17.78, units = "cm", dpi=300)
+plot
+```
+***
+
+###  PCA Plots
+Several ways can be used to plot the PCA plots. A simple version, using the `plotPCA` function from DESeq2.
+```{r, fig.height=6, fig.width=7}
+plotPCA(rlogdds, intgroup=c("genotype"), ntop = 1000) +
+  theme_bw() +
+  ggtitle("PCA of Rlog transformed counts") +
+  #scale_y_continuous(limits=c(-50,50)) +
+  theme(plot.title = element_text(size = 12, hjust = 0.5)) +
+  geom_text_repel(aes(label = colnames(rlogdds)),force = 5, max.overlaps = 50)
+```
+Here is another, more fancy way, of getting a PCA plot using ggplot2.
+```{r, fig.height=6, fig.width=7}
+pcaData <- plotPCA(rlogdds, intgroup = c("genotype", "state"), ntop = 1000, returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+ggplot(pcaData, aes(PC1, PC2, color = genotype, shape = state)) +
+  geom_point(size = 3) +
+  geom_text_repel(aes(label = rownames(pcaData)), max.overlaps = 50, force = 30) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ylim(-50, 50) +
+  theme_bw() +
+  coord_fixed()
+```
+We can also use a different package to perform PCA analysis: `PCAtools`.\
+The order of the legends can be defined in the metadata table. For this, the relevant column has to be defined as factors, and the values have to be ordered with `relevel`, which we already done.
+```{r, fig.height=5, fig.width=7}
+metadata <- sample_info
+metadata
+metadata$condition <- factor(metadata$condition, levels = c("primed_WT", "primed_KO", "naive_WT", "naive_KO"))
+```
+PCA can be run with rlogged log2 normalized counts. This is better for visualization approaches such as PCA, clustering, etc...
+```{r, fig.height=6, fig.width=7}
+prlog <- PCAtools::pca(as.matrix(assay(rlogdds)), metadata = metadata, removeVar = 0.1)
+
+biplot(prlog, 
+       colby = 'condition', 
+       colLegendTitle = 'Condition',
+       # encircle config
+       encircle = F, 
+       encircleFill = T,
+       encircleAlpha = .5, 
+       encircleLineSize = 3,
+       shape = "state",
+       shapeLegendTitle = "Pluripotency State",
+       pointSize = 3,
+       #hline = 0, 
+       #vline = c(-25, 0, 25),
+       legendPosition = 'right',
+       legendTitleSize = 12,
+       legendLabSize = 10, 
+       legendIconSize = 3)
+```
+Modify line types, remove gridlines, and increase point size.
+```{r, fig.height=6, fig.width=7}
+biplot(prlog, 
+       colby = 'condition', 
+       colLegendTitle = 'Condition',
+       shape = "state",
+       shapeLegendTitle = "Pluripotency State",
+        # encircle config
+       encircle = F, 
+       encircleFill = T,
+       encircleAlpha = .2, 
+       encircleLineSize = 1.5,
+       encircleLineCol = "black",
+       # gridlines' removal
+       gridlines.major = FALSE, 
+       gridlines.minor = FALSE,
+       pointSize = 3,
+       drawConnectors = T,
+       legendPosition = 'right',
+       legendTitleSize = 12,
+       legendLabSize = 10, 
+       legendIconSize = 3)
+```
+Same as above, but with loadings.
+```{r, fig.height=6, fig.width=7}
+pca_multimapped_plot <- biplot(prlog,
+       x = 'PC1', 
+       y = 'PC2',
+       # loadings parameters
+       showLoadings = TRUE,
+       #lengthLoadingsArrowsFactor = 1,
+       widthLoadingsArrows = 0.3,
+       alphaLoadingsArrow = 0.7,
+       sizeLoadingsNames = 2.5,
+       colLoadingsNames = 'red4',
+       fillBoxedLoadings = alpha('red4', 0.03),
+       # other parameters
+       colby = 'condition',
+       colLegendTitle = 'Condition',
+       shape = 'state',
+       shapeLegendTitle = "Pluripotency State",
+       gridlines.major = FALSE, 
+       gridlines.minor = FALSE,
+       pointSize = 3,
+       legendPosition = 'right',
+       legendTitleSize = 10,
+       legendLabSize = 10, 
+       legendIconSize = 3,
+       drawConnectors = T,
+       # Titles and captions
+       # title = 'PCA bi-plot',
+       # subtitle = 'PC1 versus PC2',
+       # caption = '2 PCs ≈ 97% variance'
+       )
+
+pca_multimapped_plot
+```
+
+```{r, fig.height=7, fig.width=7}
+pca_multimapped_plot <- biplot(prlog,
+       x = 'PC1', 
+       y = 'PC2',
+       # loadings parameters
+       showLoadings = TRUE,
+       widthLoadingsArrows = 0.3,
+       alphaLoadingsArrow = 0.7,
+       sizeLoadingsNames = 2.5,
+       colLoadingsNames = 'red4',
+       fillBoxedLoadings = alpha('red4', 0.03),
+       # other parameters
+       colby = 'condition',
+       colLegendTitle = 'Condition',
+       shape = 'state',
+       shapeLegendTitle = "Pluripotency State",
+       gridlines.major = FALSE, 
+       gridlines.minor = FALSE,
+       pointSize = 3,
+       legendPosition = 'bottom',  # Move the legend to the bottom
+       legendTitleSize = 10,
+       legendLabSize = 10, 
+       legendIconSize = 3,
+       drawConnectors = T) +
+  theme(legend.position = "bottom",       # Position both legends at the bottom
+        legend.box = "vertical",          # Stack legends vertically
+        legend.spacing.y = unit(0.4, "lines"),
+        legend.margin = margin(0, 0, 0, 0),
+        #legend.box.spacing = unit(0.3, "cm"),
+        legend.title = element_text(face = "bold")
+        # ,      # Make legend titles bold
+        #legend.spacing.x = unit(0.1, "cm"))              # Reduce horizontal space between legend items
+        )
+
+pca_multimapped_plot
+```
+```{r, fig.height=6, fig.width=12}
+
+# Adjust the margins of the plots to reduce space
+pca_uniquely_mapped_plot_adjusted <- pca_uniquely_mapped_plot + 
+  theme(plot.margin = margin(0, 5, 0, 5))  # Adjust margins (top, right, bottom, left)
+
+pca_multimapped_plot_adjusted <- pca_multimapped_plot + 
+  theme(plot.margin = margin(0, 5, 0, 5))  # Adjust margins (top, right, bottom, left)
+
+# Arrange the two plots vertically and keep one legend at the bottom
+combined_pca_plot <- ggarrange(
+  pca_multimapped_plot_adjusted,
+  pca_uniquely_mapped_plot_adjusted, 
+  ncol = 2,              # Arrange vertically
+  common.legend = TRUE,  # Share the same legend
+  legend = "right",     # Place legend at the bottom
+  heights = c(1, 1),      # Equal heights for both plots
+  labels = c("A", "B")
+)
+
+# Display the combined plot
+combined_pca_plot
+
+
+```
+
+
+
+```{r, fig.height=10, fig.width=6}
+
+# Adjust the margins of the plots to reduce space
+pca_uniquely_mapped_plot_adjusted <- pca_uniquely_mapped_plot + 
+  theme(plot.margin = margin(0, 5, 0, 5))  # Adjust margins (top, right, bottom, left)
+
+pca_multimapped_plot_adjusted <- pca_multimapped_plot + 
+  theme(plot.margin = margin(0, 5, 0, 5))  # Adjust margins (top, right, bottom, left)
+
+# Arrange the two plots vertically and keep one legend at the bottom
+combined_pca_plot <- ggarrange(
+  pca_multimapped_plot_adjusted,
+  pca_uniquely_mapped_plot_adjusted, 
+  ncol = 1,              # Arrange vertically
+  common.legend = TRUE,  # Share the same legend
+  legend = "bottom",     # Place legend at the bottom
+  heights = c(1, 1)      # Equal heights for both plots
+)
+
+# Display the combined plot
+combined_pca_plot
+
+
+```
+
+```{r}
+clustering_multimapped_plot
+pca_multimapped_plot
+pca_uniquely_mapped_plot
+
+```
+```{r, fig.height=12, fig.width=12}
+ggarrange(clustering_multimapped_plot$gtable,
+          combined_pca_plot, 
+          ncol = 1)
+```
+```{r, fig.height=8, fig.width=12}
+ggarrange(clustering_multimapped_plot$gtable,
+          combined_pca_plot, 
+          ncol = 2)
+```
+Let's look at PC2 and PC3, to check whether PC3 can explain more biological variability?
+```{r, fig.height=6, fig.width=7}
+pca_multimapped_plot_pc2_pc3 <- biplot(prlog,
+       x = 'PC2', 
+       y = 'PC3',
+       # loadings parameters
+       showLoadings = F,
+       #lengthLoadingsArrowsFactor = 1,
+       widthLoadingsArrows = 0.3,
+       alphaLoadingsArrow = 0.7,
+       sizeLoadingsNames = 2.5,
+       colLoadingsNames = 'red4',
+       fillBoxedLoadings = alpha('red4', 0.03),
+       # other parameters
+       colby = 'condition',
+       colLegendTitle = 'Condition',
+       shape = 'state',
+       shapeLegendTitle = "Pluripotency State",
+       gridlines.major = FALSE, 
+       gridlines.minor = FALSE,
+       pointSize = 3,
+       legendPosition = 'right',
+       legendTitleSize = 10,
+       legendLabSize = 10, 
+       legendIconSize = 3,
+       drawConnectors = T,
+       # Titles and captions
+       # title = 'PCA bi-plot',
+       # subtitle = 'PC1 versus PC2',
+       # caption = '2 PCs ≈ 97% variance'
+       )
+
+pca_multimapped_plot_pc2_pc3
+```
+
+Similar to the above, but with a different styling.
+```{r, fig.height=7, fig.width=9}
+biplot(prlog,
+       colby = 'condition', 
+       #colkey = c('Control'='royalblue', 'Angelman'='red3'),
+       colLegendTitle = 'Condition',
+       shape = 'state', 
+       shapekey = c('primed' = 15, 'naive' = 17),
+       shapeLegendTitle = "Pluripotency State",
+       # loadings parameters
+       showLoadings = TRUE,
+       sizeLoadingsNames = 2.5,
+       widthLoadingsArrows = 0.3,
+       alphaLoadingsArrow = 0.7,
+       colLoadingsNames = 'red4',
+       fillBoxedLoadings = alpha('red4', 0.03),
+       # other parameters
+       hline = 0, 
+       vline = c(-25, 0, 25),
+       vlineType = c('dotdash', 'solid', 'dashed'),
+       gridlines.major = FALSE, 
+       gridlines.minor = FALSE,
+       pointSize = 3,
+       legendPosition = 'right',
+       legendLabSize = 10,
+       legendIconSize = 3.0,
+       drawConnectors = T,
+       #title = 'PCA bi-plot',
+       #subtitle = 'PC1 versus PC2,
+       #caption = '2 PCs ≈ 80%'
+       )
+```
+We can next play around with PCA, coloring by a continuous variable, like a particular gene expression.
+```{r, fig.height=6, fig.width=7}
+#Color by a continuous variable and plot other PCs
+prlog$metadata$XIST <- countsDESeq2NormLog2['XIST',]
+
+biplot(prlog,
+       x = 'PC1', y = 'PC2',
+       #lab = NULL,
+       colby = 'XIST',
+       shape = 'genotype',
+       #hline = 0, vline = 0,
+       drawConnectors = T,
+       legendPosition = 'right') +
+  scale_colour_gradient(low = 'gold', high = 'red2')
+```
+```{r, fig.height=6, fig.width=7}
+prlog$metadata$XACT <- countsDESeq2NormLog2['XACT',]
+
+biplot(prlog, x = 'PC1', y = 'PC2',
+       #lab = NULL,
+       colby = 'XACT',
+       hline = 0, vline = 0,
+       hlineWidth = .1, 
+       vlineWidth = .1,
+       gridlines.major = FALSE, 
+       gridlines.minor = TRUE,
+       pointSize = 5,
+       legendPosition = 'left', 
+       legendLabSize = 16, 
+       legendIconSize = 8.0,
+       shape = 'genotype',
+       drawConnectors = T
+       # ,
+       # title = 'PCA bi-plot',
+       # subtitle = 'PC1 versus PC2',
+       # caption = '3 PCs ≈ 80%'
+) +
+  scale_colour_gradient(low = 'gold', high = 'red2')
+  scale_colour_gradient(low = 'blue', high = 'red')
+```
+We can explore which variables (genes) drive variation among each PCs.
+```{r, fig.height=7, fig.width=8}
+plotloadings(prlog,
+             #components = getComponents(p, c(1:5)),
+             rangeRetain = 0.15,
+             labSize = 3.0,
+             absolute = F,
+             legendPosition = "bottom",
+             legendLabSize = 10,
+             caption = 'Top 15% variables',
+             axisLabSize = 12,
+             shape = 21, 
+             shapeSizeRange = c(1, 8),
+             col = c('blue', 'white', 'red'),
+             drawConnectors = F,
+             gridlines.major = F,
+             gridlines.minor = F) 
+```
+We can also have a quick look at different PCs, to try to identify PCs that allow explaining a separation in the data.
+```{r, fig.height=10, fig.width=12, message = FALSE, warning = FALSE}
+suppressMessages(pairsplot(prlog,
+          components = getComponents(prlog, c(1:4)),
+          triangle = TRUE, 
+          trianglelabSize = 12,
+          hline = 0, 
+          vline = 0,
+          pointSize = 2,
+          gridlines.major = FALSE, 
+          gridlines.minor = FALSE,
+          colby = 'condition',
+          title = 'Pairs plot', 
+          titleLabSize = 14,
+          axisLabSize = 10,
+          plotaxes = TRUE,
+          shape = "state",
+          #ncol = 5,
+          #nrow = 2,
+          margingaps = unit(c(-0.01, -0.01, -0.01, -0.01), 'cm')))
+```
+***
+
+### Hierarchical Clustering
+Using Euclidean Distances
+```{r}
+distances_rlogdds_clustering <- dist(t(assay(rlogdds)), method = "euclidean") # calculate distances using transformed and normalized counts
+plot(hclust(distances_rlogdds_clustering, method = "ward.D2"),
+     labels = colnames(rlogdds),
+     main = "rlog transformed read counts\ndistance: Euclidean Distances")
+```
+Using Pearson Correlation
+```{r}
+distances_rlogdds_clustering <- as.dist(1-cor(assay(rlogdds), method = "pearson"))
+plot(hclust(distances_rlogdds_clustering, method = "ward.D2"),
+     labels = colnames(rlogdds),
+     main = "rlog transformed read counts\ndistance: Pearson correlation")
+```
+Can also be plotted differently, putting all samples at the same level
+```{r}
+distances_rlogdds_clustering = as.dist(1-cor(assay(rlogdds), method = "pearson"))
+HCA <- hclust(distances_rlogdds_clustering, method = "ward.D2")
+plot(HCA,
+     labels = colnames(rlogdds),
+     main = "rlog transformed read counts\ndistance: Pearson correlation",
+     hang = - 1)
+```
+ We can also represent it as a dendogram, and label the different samples
+```{r}
+# Define nodePar
+nodePar <- list(lab.cex = .9, pch = c(NA, 19), 
+                cex = 0.7, col = "red")
+plot(as.dendrogram(HCA),
+     type = "rectangle",
+     ylab = "Height",
+     main = "rlog transformed read counts\ndistance: Pearson correlation",
+     nodePar = nodePar)
+```
+## Acessing the values for specific genes
+We can now access the values for genes of interest. For this, we will use a couple of functions to plot the desired information.
+```{r}
+#' genePlot
+#' This function will take a DESeq2 dds after analysis, a gene of interest and a group of interest
+#' and plot a graphic with normalized read counts for that gene, across the different samples.
+#' 
+#' INPUT:
+#'  @param dds DESeq2 dds object
+#'  @param gene gene of interest
+#'  @param intgroup condition of interest 
+#' OUTPUT
+#'  @return plot with the number of normalized counts for a given gene, per sample (organized by interest group)
+
+genePlot <- function(dds, gene, intgroup) {
+  
+  plot <- plotCounts(dds, 
+                     gene = gene, 
+                     intgroup = intgroup,
+                     normalized = TRUE,
+                     returnData = TRUE)
+  
+  ggplot(plot, aes(x = plot[,2], y = count, color = plot[,2])) +
+    theme_bw() +
+    geom_point(position = position_jitter(w = 0.1, h = 0), size = 3) +
+    geom_text_repel(aes(label = colnames(assay(dds))),
+                    max.overlaps = Inf,
+                    force = 5,
+                    show.legend = F) +
+    theme(plot.title=element_text(size=14, face="bold", hjust=0.5)) +
+    labs(title = paste0("Expression of ", gene, " in primed and naive hESCs"),
+         x = "",
+         y = "Normalized Counts") +
+    labs(color = paste(toupper(substr(intgroup, 1, 1)), substr(intgroup, 2, nchar(intgroup)), sep=""))
+}
+
+#' genePlotV2
+#' This function will take a DESeq2 dds after analysis, a gene of interest and a group of interest
+#' and plot a graphic with normalized read counts for that gene, across the different samples.
+#' 
+#' INPUT:
+#'  @param dds DESeq2 dds object
+#'  @param gene gene of interest
+#'  @param intgroup condition of interest 
+#' OUTPUT
+#'  @return plot with the number of normalized counts for a given gene, per sample (organized by interest group)
+
+genePlotV2 <- function(dds, gene, intgroup) {
+  
+  plot <- plotCounts(dds, 
+                     gene = gene, 
+                     intgroup = intgroup,
+                     normalized = TRUE,
+                     returnData = TRUE)
+  
+  ggplot(plot, aes(x = plot[,2], y = count, color = plot[,2])) +
+    theme_bw() +
+    geom_violin(alpha = 0.25, 
+                trim = F, 
+                size = .3,
+                aes(fill = plot[,2]),
+                show.legend = F) +
+    geom_boxplot(width = 0.05, 
+                 fill = "white", 
+                 color = "black",
+                 lwd = 0.5,
+                 alpha = .8, 
+                 show.legend = F) +
+    geom_point(position = "jitter", 
+               size = 2) +
+    geom_text_repel(aes(label = colnames(assay(dds))),
+                    color = "black",
+                    size = 3,
+                    show.legend = F) +
+    theme(plot.title=element_text(size=14, face="bold", hjust=0.5)) +
+    labs(title = paste0("Expression of ", gene, " in primed and naive hESCs"),
+         x = "",
+         y = "Normalized Counts") +
+    guides(colour = guide_legend(override.aes = list(alpha=1))) +
+    labs(color = paste(toupper(substr(intgroup, 1, 1)), substr(intgroup, 2, nchar(intgroup)), sep="")) +
+    theme(plot.title = element_text(size = 14,
+                                    face = "bold",
+                                    hjust = 0.5,
+                                    lineheight = 1.2),
+          axis.text.x = element_text(size = 10,
+                                     angle = 45,
+                                     colour = 'black',
+                                     hjust = 1),
+          axis.title.y = element_text(size = 12),
+          axis.text.y = element_text(size = 10,
+                                     colour = "black"),
+          legend.position = "right")
+}
+```
+Using this function, we can plot individual genes of interest.
+```{r, fig.height=6, fig.width=7}
+dds$condition <- factor(dds$condition, levels=c("primed_WT", "primed_KO", "naive_WT", "naive_KO"))
+genePlot(dds, "DNMT3L", "condition")
+```
+```{r, fig.height=6, fig.width=7}
+genePlot(dds, "XIST", "condition")
+```
+```{r, fig.height=6, fig.width=7}
+genePlot(dds, "XACT", "condition")
+```
+```{r, fig.height=6, fig.width=7}
+genePlot(dds, "KLF4", "condition")
+```
+```{r, fig.height=6, fig.width=7}
+genePlot(dds, "MYC", "condition")
+```
+```{r, fig.height=6, fig.width=7}
+genePlot(dds, "TE_LTR7", "condition")
+```
+```{r, fig.height=6, fig.width=7}
+genePlot(dds, "TE_LTR5", "condition")
+```
+
+***
+
+## DESeq2 Differential Expression after DESeq2 normalization
+As the DESeq2 has already been specified with an experimental design, when we first created the DESeqDataSet, we can now just run the differential expression pipeline to the raw counts with a single call to the function DESeq.
+```{r}
+dds <- DESeq(dds) # Run the differential expression pipeline on the raw counts. ALWAYS raw counts!!!
+dds
+```
+We can now plot the differential expression model. This is, the generalized linear model and the dispersion estimates of the genes from it.
+```{r}
+plotDispEsts(dds)
+```
+Extract the results, either using a defined contrast or letting the program choose.
+Using the contrast matrix, tries to analyze the differential gene expression between the conditions provided, while taking all information into consideration.
+This is the advantage of using these models, as it confers an added efficiency of predicting DEGs that are really associated with the different conditions provided in the contrast matrix.
+```{r}
+# Check which results are pre-computed by DESeq2
+resultsNames(dds)
+```
+***
+
+## Differential Expression Results {.tabset .tabset-pills}
+Alternatively, we can use the strategy employed on the `Experimental Design` section, and use explicit contrasts to extract the results we are interested in.
+
+### 1. Naive Vs Primed hESCs {.tabset .tabset-pills}
+#### Results extraction
+```{r}
+res_genotype_state_naiveVsPrimed_interaction <- results(dds_interaction, independentFiltering = TRUE, name = "state_naive_vs_primed")
+summary(res_genotype_state_naiveVsPrimed_interaction)
+# Using independentFiltering = FALSE, the results obtained are not independently filtered, using the mean of normalized counts as a filter statistic.
+# This shouldn't be used as a standard approach, as it might give less robust results.
+```
+Let's visualize the top DEGs.
+```{r}
+head(res_genotype_state_naiveVsPrimed_interaction[order(abs(res_genotype_state_naiveVsPrimed_interaction$stat), decreasing = T),], 10)
+```
+```{r}
+data.frame(res_genotype_state_naiveVsPrimed_interaction) %>% 
+  DT::datatable(extensions = 'Buttons',
+            options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+```
+Let's extract the results for the all the TE subfamilies
+```{r}
+res_genotype_state_naiveVsPrimed_interaction_TEs <- res_genotype_state_naiveVsPrimed_interaction[grepl("TE_",rownames(res_genotype_state_naiveVsPrimed_interaction)), ]
+```
+And visualise these, with a data table.
+```{r}
+data.frame(res_genotype_state_naiveVsPrimed_interaction_TEs) %>% 
+  DT::datatable(extensions = 'Buttons',
+            options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+```
+
+
+#### Visualization of results
+##### MA Plots
+Let's visualize the results. For this, let's use a MA plot, that will show the log fold change of WT vs KO, per gene (for a mean normalized count of each gene).
+```{r}
+par( mfrow = c( 1, 1 ) )
+DESeq2::plotMA(res_genotype_state_naiveVsPrimed_interaction, 
+               alpha = 0.05, 
+               main = "Naive H9 hESCs Vs. Primed H9 hESCs",
+               #ylim = c(-20, 20)
+)
+```
+We can see, in blue, genes that have an adjusted p value < 0.05. These tend to be located around higher mean count, or showing a bigger log fold change. There is a lot of noise from the low count genes. In order to tackle this issue, DESeq2 can produce shrunken log2 fold changes to reduce the noise.
+```{r}
+res_genotype_state_naiveVsPrimed_interaction_shrink <- lfcShrink(dds, coef = "state_naive_vs_primed", res = res_genotype_state_naiveVsPrimed_interaction) 
+# If we use the coefficient from the DESeq2 object, we can use the "apeglm" model for shrinking. Alternatively, we will need to use `ashr` for shrinkage estimators, as `apeglm` doesn't support the use of contrasts.
+
+plotMA(res_genotype_state_naiveVsPrimed_interaction_shrink, 
+       alpha = 0.05,
+       main = "Naive H9 hESCs Vs. Primed H9 hESCs - ashr LFC shrinkage",
+       ylim = c(-20, 20), 
+       colNonSig = "gray",
+       colSig = "red")
+```
+##### Volcano Plots for differentially expressed genes (DEGs) and differentially expressed subfamilies of TEs (DETEs)
+Let's plot the volcano plot for log2FC and -log10(padj) first (more traditional way of displaying). As a threshold for significance, we will use a log2  fold-change of 2 (doubling of transcripts) and a p-adjusted bellow 0.01 (meaning, 1% of all tests will result in false positives).
+```{r, fig.height=6, fig.width=7}
+# Volcano plot with gene name information and information about gene LFC and statistics
+# We first create a columns with gene names that will be used to label the 20 most significant DEGs.
+results_ordered_DESeq2_naiveVsPrimed <- data.frame(res_genotype_state_naiveVsPrimed_interaction)
+results_ordered_DESeq2_naiveVsPrimed <- results_ordered_DESeq2_naiveVsPrimed[order(results_ordered_DESeq2_naiveVsPrimed$padj), ]
+results_ordered_DESeq2_naiveVsPrimed$genelabels = ""
+results_ordered_DESeq2_naiveVsPrimed$genelabels[1:15] <- rownames(results_ordered_DESeq2_naiveVsPrimed)[1:15]
+
+# Next, we crate another column to include the LFC and statistical information for the genes.
+results_ordered_DESeq2_naiveVsPrimed$Class <- "NS"
+results_ordered_DESeq2_naiveVsPrimed$Class[which(abs(results_ordered_DESeq2_naiveVsPrimed$log2FoldChange) > 2)] <- "|logFC| > 2"
+results_ordered_DESeq2_naiveVsPrimed$Class[which(results_ordered_DESeq2_naiveVsPrimed$padj < 0.01)] <- "padj < 0.01"
+results_ordered_DESeq2_naiveVsPrimed$Class[which(results_ordered_DESeq2_naiveVsPrimed$padj < 0.01 & abs(results_ordered_DESeq2_naiveVsPrimed$log2FoldChange) > 2)] <- "padj < 0.01 & |logFC| > 2"
+results_ordered_DESeq2_naiveVsPrimed$Class[which(grepl("TE_",  rownames(results_ordered_DESeq2_naiveVsPrimed)))] <- "TEs"
+
+# Now, we only have to plot the volcano plot.
+ggplot(results_ordered_DESeq2_naiveVsPrimed) +
+  theme_bw() +
+  geom_point(aes(x = log2FoldChange, y = -log10(padj), color = Class), size = 1.5, alpha = .4, na.rm = T) +
+  scale_colour_manual(breaks = c("NS", "|logFC| > 2", "padj < 0.01", "padj < 0.01 & |logFC| > 2", "TEs"),
+                      values = c("gray50", "seagreen", "royalblue", "firebrick", "black")) + # Add a manual scale color (and order), for the elements in column "Class".
+  geom_label_repel(#fontface = "bold",
+                   max.overlaps = Inf,
+                   force = 10,
+                   fill = alpha("red", .05),
+                   label.size = .3,
+                   label.padding = .2,
+                   na.rm = T,
+                   segment.size = .4,
+                   segment.linetype = 6,
+                   #nudge_x = .15,
+                   #nudge_y = 1,
+                   segment.curvature = -0.1,
+                   segment.ncp = 3,
+                   segment.angle = 20,
+                   aes(x = log2FoldChange, y = -log10(padj), label = ifelse(genelabels != "", rownames(results_ordered_DESeq2_naiveVsPrimed),""))) + # Add gene names to most significant DEGs
+  geom_point(data = results_ordered_DESeq2_naiveVsPrimed[grepl("TE_",rownames(results_ordered_DESeq2_naiveVsPrimed)) &
+                                                           abs(results_ordered_DESeq2_naiveVsPrimed$log2FoldChange) > 1 &
+                                                           results_ordered_DESeq2_naiveVsPrimed$padj < 0.01,],
+             aes(x = log2FoldChange, y = -log10(padj)), color = "black", size = 1.5, alpha = .8) +
+  ggtitle("Volcano plot for differentially expressed genes (DEGs)\nPrimed Vs. Naive\npadj < 0.01 & |log2fc| > 2") +
+  xlab("log2 fold change") + 
+  ylab("-log10 padj") +
+  #scale_y_continuous(trans = "log1p") +
+  #scale_y_continuous(limits = c(0,700)) +
+  #scale_x_continuous(limits = c(-10.5, 10.5)) +
+  geom_hline(yintercept = -log10(0.01), colour = "firebrick", linetype = 4) + # Add line to intercept -log10(0.05).
+  geom_vline(xintercept = c(-2, 2), colour = "firebrick", linetype = 4) + # Add lines to intercept the + and - 2 log2FC.
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 0.8))) + # Over-ride aesthetics for figure legend.
+  theme(legend.position = "bottom",
+        legend.background = element_rect(fill = "white",
+                                         size = 0.5, 
+                                         linetype = 3, 
+                                         colour ="black"),
+        legend.title = element_blank(),
+        plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+        axis.title = element_text(size = 12)) + # Add several theme features.
+  annotate("rect", xmin = c(-2, 2), xmax = c(-Inf, Inf), ymin = -log10(0.01), ymax = Inf, alpha = .2, fill = "mistyrose") # Add a rectangle to shade the area of DEGs.
+```
+We can also plot the volcano, using the Wald Statistic, the statistic used by the DESeq2 algorithm.
+```{r, fig.height=6, fig.width=7}
+results_ordered_DESeq2_naiveVsPrimed_Wald <- data.frame(res_genotype_state_naiveVsPrimed_interaction)
+
+# Label genes by Wald Statistic
+results_ordered_DESeq2_naiveVsPrimed_Wald <- results_ordered_DESeq2_naiveVsPrimed_Wald[order(results_ordered_DESeq2_naiveVsPrimed_Wald$stat, decreasing = T), ]
+results_ordered_DESeq2_naiveVsPrimed_Wald$genelabels = ""
+results_ordered_DESeq2_naiveVsPrimed_Wald$genelabels[1:10] <- rownames(results_ordered_DESeq2_naiveVsPrimed_Wald)[1:10]
+results_ordered_DESeq2_naiveVsPrimed_Wald <- results_ordered_DESeq2_naiveVsPrimed_Wald[order(results_ordered_DESeq2_naiveVsPrimed_Wald$stat), ]
+results_ordered_DESeq2_naiveVsPrimed_Wald$genelabels[1:10] <- rownames(results_ordered_DESeq2_naiveVsPrimed_Wald)[1:10]
+
+
+
+# Next, we crate another column to include the LFC and statistical information for the genes.
+results_ordered_DESeq2_naiveVsPrimed_Wald$Class <- "NS"
+results_ordered_DESeq2_naiveVsPrimed_Wald$Class[which(abs(results_ordered_DESeq2_naiveVsPrimed_Wald$log2FoldChange) > 2)] <- "|logFC| > 2"
+results_ordered_DESeq2_naiveVsPrimed_Wald$Class[which(abs(results_ordered_DESeq2_naiveVsPrimed_Wald$stat) > 3)] <- "|WaldStat| > 3"
+results_ordered_DESeq2_naiveVsPrimed_Wald$Class[which(abs(results_ordered_DESeq2_naiveVsPrimed_Wald$stat) > 3 & abs(results_ordered_DESeq2_naiveVsPrimed_Wald$log2FoldChange) > 2)] <- "|WaldStat| > 3 & |logFC| > 2"
+results_ordered_DESeq2_naiveVsPrimed_Wald$Class[which(grepl("TE_",  rownames(results_ordered_DESeq2_naiveVsPrimed_Wald)))] <- "TEs"
+
+
+
+# Now, we only have to plot the volcano plot.
+volcano_subfamilies <- ggplot(results_ordered_DESeq2_naiveVsPrimed_Wald) +
+  theme_bw() +
+  geom_point(aes(x = log2FoldChange, y = abs(stat), color = Class), size = 1.5, alpha = .4, na.rm = T) +
+  scale_colour_manual(breaks = c("NS", "|logFC| > 2", "|WaldStat| > 3", "|WaldStat| > 3 & |logFC| > 2", "TEs"),
+                      values = c("gray50", "seagreen", "royalblue", "firebrick", "black")) + # Add a manual scale color (and order), for the elements in column "Class".
+  geom_label_repel(#fontface = "bold",
+    max.overlaps = Inf,
+    force = 10,
+    fill = alpha("red", .03),
+    label.size = .3,
+    label.padding = .2,
+    na.rm = T,
+    segment.size = .4,
+    segment.linetype = 6,
+    min.segment.length = 0,
+    #nudge_x = .15,
+    #nudge_y = 1,
+    segment.curvature = -0.1,
+    segment.ncp = 3,
+    segment.angle = 20,
+    aes(x = log2FoldChange, y = abs(stat), label = ifelse(genelabels != "", rownames(results_ordered_DESeq2_naiveVsPrimed_Wald),""))) + # Add gene names to most significant DEGs
+  geom_point(data = results_ordered_DESeq2_naiveVsPrimed_Wald[grepl("TE_",rownames(results_ordered_DESeq2_naiveVsPrimed_Wald)) &
+                                                           abs(results_ordered_DESeq2_naiveVsPrimed_Wald$log2FoldChange) > 1 &
+                                                             abs(results_ordered_DESeq2_naiveVsPrimed_Wald$stat) > 3,],
+             aes(x = log2FoldChange, y = abs(stat)), color = "black", size = 1.5, alpha = .8) +
+  ggtitle("Volcano plot for DEGs and DETEs\nPrimed Vs. Naive\n|Wald Statistics| > 3 & |log2fc| > 2") +
+  xlab("log2 fold change") + 
+  ylab("|Wald Statistics|") +
+  #scale_y_continuous(trans = "log1p") +
+  #scale_y_continuous(limits = c(0,700)) +
+  #scale_x_continuous(limits = c(-10.5, 10.5)) +
+  geom_hline(yintercept = 3, colour = "firebrick", linetype = 4) + # Add line to intercept -log10(0.05).
+  geom_vline(xintercept = c(-2, 2), colour = "firebrick", linetype = 4) + # Add lines to intercept the + and - 2 log2FC.
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 0.8))) + # Over-ride aesthetics for figure legend.
+  theme(legend.position = "bottom",
+        legend.background = element_rect(fill = "white",
+                                         size = 0.5, 
+                                         linetype = 3, 
+                                         colour ="black"),
+        legend.title = element_blank(),
+        plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+        axis.title = element_text(size = 12)) + # Add several theme features.
+  annotate("rect", xmin = c(-2, 2), xmax = c(-Inf, Inf), ymin = 3, ymax = Inf, alpha = .2, fill = "mistyrose") # Add a rectangle to shade the area of DEGs.
+
+volcano_subfamilies
+```
+##### Volcano plots for DETEs only
+To visualise how different subfamilies of TEs behave in the samples, we can plot just these genomic elements. Volcano plot with TE name information and information about TE LFC and statistics
+```{r, fig.height=6, fig.width=7}
+# We first create a columns with TE names that will be used to label the 20 most significant DETEs
+results_ordered_DESeq2_naiveVsPrimed_TEs <- data.frame(res_genotype_state_naiveVsPrimed_interaction[grepl("TE_",rownames(res_genotype_state_naiveVsPrimed_interaction)), ])
+results_ordered_DESeq2_naiveVsPrimed_TEs$genelabels = ""
+
+# Place labels based on padj
+results_ordered_DESeq2_naiveVsPrimed_TEs <- results_ordered_DESeq2_naiveVsPrimed_TEs[order(results_ordered_DESeq2_naiveVsPrimed_TEs$padj), ]
+results_ordered_DESeq2_naiveVsPrimed_TEs$genelabels[1:20] <- rownames(results_ordered_DESeq2_naiveVsPrimed_TEs)[1:20]
+
+# Place labels based on log2fc
+# results_ordered_DESeq2_naiveVsPrimed_TEs$genelabels[1:10] <- rownames(results_ordered_DESeq2_naiveVsPrimed_TEs)[1:10]
+# results_ordered_DESeq2_naiveVsPrimed_TEs <- results_ordered_DESeq2_naiveVsPrimed_TEs[order(results_ordered_DESeq2_naiveVsPrimed_TEs$log2FoldChange), ]
+# results_ordered_DESeq2_naiveVsPrimed_TEs$genelabels[1:10] <- rownames(results_ordered_DESeq2_naiveVsPrimed_TEs)[1:10]
+
+# Next, we crate another column to include the LFC and statistical information for the TEs
+results_ordered_DESeq2_naiveVsPrimed_TEs$Class <- "NS"
+results_ordered_DESeq2_naiveVsPrimed_TEs$Class[which(abs(results_ordered_DESeq2_naiveVsPrimed_TEs$log2FoldChange) > 1)] <- "|logFC| > 1"
+results_ordered_DESeq2_naiveVsPrimed_TEs$Class[which(results_ordered_DESeq2_naiveVsPrimed_TEs$padj < 0.01)] <- "padj < 0.05"
+results_ordered_DESeq2_naiveVsPrimed_TEs$Class[which(results_ordered_DESeq2_naiveVsPrimed_TEs$padj < 0.01 & abs(results_ordered_DESeq2_naiveVsPrimed_TEs$log2FoldChange) > 1)] <- "padj < 0.05 & |logFC| > 1"
+
+# Now, we only have to plot the volcano plot.
+ggplot(results_ordered_DESeq2_naiveVsPrimed_TEs) +
+  theme_bw() +
+  geom_point(aes(x = log2FoldChange, y = -log10(padj), color = Class), size = 1.5, alpha = .4) +
+  scale_colour_manual(breaks = c("NS", "|logFC| > 1", "padj < 0.05", "padj < 0.05 & |logFC| > 1"),
+                      values = c("gray50", "seagreen", "royalblue", "firebrick")) + # Add a manual scale color (and order), for the elements in column "Class".
+  geom_label_repel(#fontface = "bold",
+    max.overlaps = Inf,
+    force = 50,
+    fill = alpha("red", .05),
+    label.size = .3,
+    label.padding = .2,
+    na.rm = T,
+    segment.size = .4,
+    segment.linetype = 6,
+    #nudge_x = .15,
+    #nudge_y = 1,
+    segment.curvature = -0.1,
+    segment.ncp = 3,
+    segment.angle = 20,
+    aes(x = log2FoldChange, y = -log10(padj), label = ifelse(genelabels != "", gsub("TE_", "", rownames(results_ordered_DESeq2_naiveVsPrimed_TEs)),""))) + # Add gene names to most significant DEGs
+  ggtitle("Volcano plot for differentially expressed TEs (DETEs)\nPrimed Vs. Naive\npadj < 0.01 & |log2fc| > 1") +
+  xlab("log2 fold change") + 
+  ylab("-log10 padj") +
+  #scale_y_continuous(trans = "log1p") +
+  #scale_y_continuous(limits = c(0,700)) +
+  #scale_x_continuous(limits = c(-10.5, 10.5)) +
+  geom_hline(yintercept = -log10(0.01), colour = "firebrick", linetype = 4) + # Add line to intercept -log10(0.05).
+  geom_vline(xintercept = c(-1, 1), colour = "firebrick", linetype = 4) + # Add lines to intercept the + and - 2 log2FC.
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 0.8))) + # Over-ride aesthetics for figure legend.
+  theme(legend.position = "bottom",
+        legend.background = element_rect(fill = "white",
+                                         size = 0.5, 
+                                         linetype = 3, 
+                                         colour ="black"),
+        legend.title = element_blank(),
+        plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+        axis.title = element_text(size = 12)) + # Add several theme features.
+  annotate("rect", xmin = c(-1, 1), xmax = c(-Inf, Inf), ymin = -log10(0.01), ymax = Inf, alpha = .2, fill = "mistyrose") # Add a rectangle to shade the area of DEGs.
+```
+
+#######################################################################
+################## Based on Wald Stats ################################
+#######################################################################
+```{r, fig.height=6, fig.width=7}
+# Volcano plot with TE name information and information about TE LFC and statistics
+# We first create a columns with TE names that will be used to label the 20 most significant DETEs
+results_ordered_DESeq2_naiveVsPrimed_TEs_Wald <- data.frame(res_genotype_state_naiveVsPrimed_interaction[grepl("TE_",rownames(res_genotype_state_naiveVsPrimed_interaction)), ])
+results_ordered_DESeq2_naiveVsPrimed_TEs_Wald$genelabels = ""
+
+# Place labels based on Wald Statistic
+results_ordered_DESeq2_naiveVsPrimed_TEs_Wald <- results_ordered_DESeq2_naiveVsPrimed_TEs_Wald[order(results_ordered_DESeq2_naiveVsPrimed_TEs_Wald$stat, decreasing = T), ]
+results_ordered_DESeq2_naiveVsPrimed_TEs_Wald$genelabels[1:15] <- rownames(results_ordered_DESeq2_naiveVsPrimed_TEs_Wald)[1:15]
+results_ordered_DESeq2_naiveVsPrimed_TEs_Wald <- results_ordered_DESeq2_naiveVsPrimed_TEs_Wald[order(results_ordered_DESeq2_naiveVsPrimed_TEs_Wald$stat), ]
+results_ordered_DESeq2_naiveVsPrimed_TEs_Wald$genelabels[1:15] <- rownames(results_ordered_DESeq2_naiveVsPrimed_TEs_Wald)[1:15]
+
+# Next, we crate another column to include the LFC and statistical information for the TEs
+results_ordered_DESeq2_naiveVsPrimed_TEs_Wald$Class <- "NS"
+results_ordered_DESeq2_naiveVsPrimed_TEs_Wald$Class[which(abs(results_ordered_DESeq2_naiveVsPrimed_TEs_Wald$log2FoldChange) > 1)] <- "|logFC| > 1"
+results_ordered_DESeq2_naiveVsPrimed_TEs_Wald$Class[which(abs(results_ordered_DESeq2_naiveVsPrimed_TEs_Wald$stat) > 3)] <- "|Wald Stat| > 3"
+results_ordered_DESeq2_naiveVsPrimed_TEs_Wald$Class[which(abs(results_ordered_DESeq2_naiveVsPrimed_TEs_Wald$stat) > 3 & abs(results_ordered_DESeq2_naiveVsPrimed_TEs_Wald$log2FoldChange) > 1)] <- "|Wald Stat| > 3 & |logFC| > 1"
+
+# Now, we only have to plot the volcano plot.
+volcano_TEs_subfamilies <- ggplot(results_ordered_DESeq2_naiveVsPrimed_TEs_Wald) +
+  theme_bw() +
+  geom_point(aes(x = log2FoldChange, y = abs(stat), color = Class), size = 1.5, alpha = .4) +
+  scale_colour_manual(breaks = c("NS", "|logFC| > 1", "|Wald Stat| > 3", "|Wald Stat| > 3 & |logFC| > 1"),
+                      values = c("gray50", "seagreen", "royalblue", "firebrick")) + # Add a manual scale color (and order), for the elements in column "Class".
+  geom_label_repel(#fontface = "bold",
+    max.overlaps = Inf,
+    force = 10,
+    fill = alpha("red", .05),
+    label.size = .3,
+    label.padding = .2,
+    na.rm = T,
+    segment.size = .4,
+    segment.linetype = 6,
+    #nudge_x = .15,
+    #nudge_y = 1,
+    segment.curvature = -0.1,
+    segment.ncp = 3,
+    segment.angle = 20,
+    aes(x = log2FoldChange, y = abs(stat), label = ifelse(genelabels != "", gsub("TE_", "", rownames(results_ordered_DESeq2_naiveVsPrimed_TEs_Wald)),""))) + # Add gene names to most significant DEGs
+  ggtitle("Volcano plot for DETEs\nPrimed Vs. Naive\n|Wald Statistics| > 3 & log2fc > |1|") +
+  xlab("log2 fold change") + 
+  ylab("|Wald Statistic|") +
+  #scale_y_continuous(trans = "log1p") +
+  #scale_y_continuous(limits = c(0,700)) +
+  #scale_x_continuous(limits = c(-10.5, 10.5)) +
+  geom_hline(yintercept = 3, colour = "firebrick", linetype = 4) + # Add line to intercept -log10(0.05).
+  geom_vline(xintercept = c(-1, 1), colour = "firebrick", linetype = 4) + # Add lines to intercept the + and - 2 log2FC.
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 0.8))) + # Over-ride aesthetics for figure legend.
+  theme(legend.position = "bottom",
+        legend.background = element_rect(fill = "white",
+                                         size = 0.5, 
+                                         linetype = 3, 
+                                         colour ="black"),
+        legend.title = element_blank(),
+        plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+        axis.title = element_text(size = 12)) + # Add several theme features.
+  annotate("rect", xmin = c(-1, 1), xmax = c(-Inf, Inf), ymin = 3, ymax = Inf, alpha = .2, fill = "mistyrose") # Add a rectangle to shade the area of DEGs.
+
+volcano_TEs_subfamilies
+```
+#### Writing tables of differential expression analysis and creating sets of DEGs and DETEs {#downregulated}
+Extracting all significant results (padj < 0.01) for both genes and TEs and for genes and TEs, separetely. 
+
+We first extract significant results for DEGs and DETEs.
+```{r}
+significant_results_naiveVsPrimed_Genes_TEs <- subset(res_genotype_state_naiveVsPrimed_interaction, padj < 0.01) # Create a subset of genes that show an adjusted p-value lower than 0.05
+significant_results_naiveVsPrimed_Genes_TEs
+```
+We next extract only DEGs.
+```{r}
+significant_results_naiveVsPrimed_Genes <- significant_results_naiveVsPrimed_Genes_TEs[!grepl("TE_",rownames(significant_results_naiveVsPrimed_Genes_TEs)), ]
+significant_results_naiveVsPrimed_Genes
+```
+And finally, we extract DETEs.
+```{r}
+significant_results_naiveVsPrimed_TEs <- significant_results_naiveVsPrimed_Genes_TEs[grepl("TE_",rownames(significant_results_naiveVsPrimed_Genes_TEs)), ]
+significant_results_naiveVsPrimed_TEs
+```
+##### Visualizing DEGs
+Show the 10 most down-regulated genes in Naive, based on fold change 
+```{r}
+head(significant_results_naiveVsPrimed_Genes_TEs[order(significant_results_naiveVsPrimed_Genes_TEs$log2FoldChange), ], 10)
+```
+```{r, fig.width=7,fig.height=6}
+genePlot(dds, "RMST", "condition")
+```
+Show the 10 most up-regulated genes in Naive, based on fold change.
+```{r}
+head(significant_results_naiveVsPrimed_Genes_TEs[order(significant_results_naiveVsPrimed_Genes_TEs$log2FoldChange, decreasing = TRUE), ], 10)
+```
+```{r, fig.width=7,fig.height=6}
+genePlot(dds, "CGA", "condition")
+```
+Show the most highly significantly expressed genes (ordered by adjusted p-value)
+```{r}
+head(significant_results_naiveVsPrimed_Genes_TEs[order(significant_results_naiveVsPrimed_Genes_TEs$padj), ], 10)
+```
+Plot the most significantly differentiated expressed gene
+```{r, fig.width=7,fig.height=6}
+genePlot(dds, "ARHGEF19", "condition")
+```
+#### Writing tables of differential expression analysis and creating sets of DEGs and DETEs
+Let's create a list of down and upregulated genes and TEs, with at least a doubling on counts and padj < 0.01. 
+
+**Let's get the downregulated genes and TEs.**
+```{r}
+results_downregulated_naiveVsPrimed_Genes_TEs <- res_genotype_state_naiveVsPrimed_interaction[which(res_genotype_state_naiveVsPrimed_interaction$log2FoldChange < -1 & res_genotype_state_naiveVsPrimed_interaction$padj < 0.01), ] # Get the downregulated genes
+head(results_downregulated_naiveVsPrimed_Genes_TEs[order(results_downregulated_naiveVsPrimed_Genes_TEs$log2FoldChange), ], 10) # Order by padjusted and print the top 10
+```
+**And the list of upregulated genes and TEs.**
+```{r}
+results_upregulated_naiveVsPrimed_Genes_TEs <- res_genotype_state_naiveVsPrimed_interaction[which(res_genotype_state_naiveVsPrimed_interaction$log2FoldChange > 1 & res_genotype_state_naiveVsPrimed_interaction$padj < 0.01), ] # Get the upregulated genes
+head(results_upregulated_naiveVsPrimed_Genes_TEs[order(results_upregulated_naiveVsPrimed_Genes_TEs$log2FoldChange, decreasing = T), ], 10) # Order by padjusted and print the top 10
+```
+**Write a table with differentially expressed genes, with a fold change bigger than +/- 1 and padj < 0.01.**
+```{r}
+sigResults_LFC1_naiveVsPrimed_Genes_TEs <- rbind(results_downregulated_naiveVsPrimed_Genes_TEs, results_upregulated_naiveVsPrimed_Genes_TEs)
+
+# write.table(as.data.frame(sigResults_LFC1_naiveVsPrimed_Genes_TEs), file = "~/Data/H9hESCs/analysis/results/DEGs_DETEs_naiveVsPrimed_padj001L2FC1.tsv",
+#              sep = "\t", quote = FALSE, row.names = TRUE)
+```
+**Write a table with all differentially expressed genes and TEs, just based on padj < 0.01.**
+```{r}
+allSignificant_naiveVsPrimed_Genes_TEs <- res_genotype_state_naiveVsPrimed_interaction[which(res_genotype_state_naiveVsPrimed_interaction$padj < 0.01), ]
+allSignificant_naiveVsPrimed_Genes_TEs <- allSignificant_naiveVsPrimed_Genes_TEs[order(allSignificant_naiveVsPrimed_Genes_TEs$padj), ]
+
+# write.table(as.data.frame(allSignificant_naiveVsPrimed_Genes_TEs), file = "~/Data/H9hESCs/analysis/results/DEGs_DETEs_naiveVsPrimed_allSig.tsv",
+#             sep = "\t", quote = FALSE, row.names = TRUE)
+
+# Write a table with all the genes
+# write.table(as.data.frame(res_genotype_state_naiveVsPrimed_interaction), file = "~/Data/H9hESCs/analysis/results/DEGs_DETEs_naiveVsPrimed_allGenesAndTEs.tsv",
+#             sep = "\t", quote = FALSE, row.names = TRUE)
+```
+**Creating tables for TEs and Genes, independently.**
+We can next create subsetted tables, with only DEGs or DETEs. Let's start with our table of DEGs and DETEs with |log2FC| > 1 and padj < 0.01.
+```{r}
+sigResults_LFC1_naiveVsPrimed_Genes_TEs <- res_genotype_state_naiveVsPrimed_interaction[which(abs(res_genotype_state_naiveVsPrimed_interaction$log2FoldChange) > 1 & res_genotype_state_naiveVsPrimed_interaction$padj < 0.01), ]
+```
+We start by extracting DEGs.
+```{r}
+sigResults_LFC1_naiveVsPrimed_Genes <- sigResults_LFC1_naiveVsPrimed_Genes_TEs[!grepl("TE_",rownames(sigResults_LFC1_naiveVsPrimed_Genes_TEs)), ]
+```
+And next, we extract the DETEs.
+```{r}
+sigResults_LFC1_naiveVsPrimed_TEs <- sigResults_LFC1_naiveVsPrimed_Genes_TEs[grepl("TE_",rownames(sigResults_LFC1_naiveVsPrimed_Genes_TEs)), ]
+```
+We can now write the independent tables.
+```{r}
+# write.table(as.data.frame(sigResults_LFC1_naiveVsPrimed_Genes), file = "~/Data/H9hESCs/analysis/results/DEGs_naiveVsPrimed_padj001L2FC1.tsv",
+#               sep = "\t", quote = FALSE, row.names = TRUE)
+
+# write.table(as.data.frame(sigResults_LFC1_naiveVsPrimed_TEs), file = "~/Data/H9hESCs/analysis/results/DETEs_naiveVsPrimed_padj001L2FC1.tsv",
+#               sep = "\t", quote = FALSE, row.names = TRUE)
+```
+Write a table with all differentially expressed genes, just based on padj < 0.01.
+```{r}
+allSignificant_naiveVsPrimed_Genes_TEs <- res_genotype_state_naiveVsPrimed_interaction[which(res_genotype_state_naiveVsPrimed_interaction$padj < 0.01), ]
+allSignificant_naiveVsPrimed_Genes_TEs <- allSignificant_naiveVsPrimed_Genes_TEs[order(allSignificant_naiveVsPrimed_Genes_TEs$padj), ]
+allSignificant_naiveVsPrimed_Genes <- allSignificant_naiveVsPrimed_Genes_TEs[!grepl("TE_",rownames(allSignificant_naiveVsPrimed_Genes_TEs)), ]
+allSignificant_naiveVsPrimed_TEs <- allSignificant_naiveVsPrimed_Genes_TEs[grepl("TE_",rownames(allSignificant_naiveVsPrimed_Genes_TEs)), ]
+# write.table(as.data.frame(allSignificant_naiveVsPrimed_Genes), file = "~/Data/H9hESCs/analysis/results/DEGs_naiveVsPrimed_allSig_padj001.tsv",
+#              sep = "\t", quote = FALSE, row.names = TRUE)
+
+# write.table(as.data.frame(allSignificant_naiveVsPrimed_TEs), file = "~/Data/H9hESCs/analysis/results/DETEs_naiveVsPrimed_allSig_padj001.tsv",
+#              sep = "\t", quote = FALSE, row.names = TRUE)
+```
+Write a table with all the genes and all TEs, separetely.
+```{r}
+DGE_results_DESeq2_primedVsnaive_Genes <- res_genotype_state_naiveVsPrimed_interaction[!grepl("TE_",rownames(res_genotype_state_naiveVsPrimed_interaction)), ]
+DGE_results_DESeq2_primedVsnaive_TEs <- res_genotype_state_naiveVsPrimed_interaction[grepl("TE_",rownames(res_genotype_state_naiveVsPrimed_interaction)), ]
+
+# write.table(as.data.frame(DGE_results_DESeq2_primedVsnaive_Genes), file = "~/Data/H9hESCs/analysis/results/DEGs_naiveVsPrimed_allGenes.tsv",
+#            sep = "\t", quote = FALSE, row.names = TRUE)
+
+# write.table(as.data.frame(DGE_results_DESeq2_primedVsnaive_TEs), file = "~/Data/H9hESCs/analysis/results/DETEs_naiveVsPrimed_allTEs.tsv",
+#             sep = "\t", quote = FALSE, row.names = TRUE)
+```
+
+#### Heatplots
+We can visualize the results using heatplots for the top DEGs\
+Let's start by creating a dataframe with annotations to use for the heaplots.
+
+##### Genes and TEs
+```{r}
+# Let's start by create a dataframe with annotations.
+# annotation_dataframe <- as.data.frame(sample_info[ , c("genotype", "state", "condition")])
+# annotation_dataframe$condition <- factor(annotation_dataframe$condition, levels= c("primed_WT", "primed_KO", "naive_WT", "naive_KO"))
+# 
+# colnames(annotation_dataframe) <- c("Genotype", "State", "Condition")
+
+annotation_dataframe <- as.data.frame(sample_info[ , c("genotype", "state")])
+
+colnames(annotation_dataframe) <- c("Genotype", "State")
+
+
+rownames(annotation_dataframe) <- rownames(sample_info)
+
+annotation_dataframe
+```
+Let's now create a heatplot for the 30 most significant DEGs.
+```{r, fig.height=8, fig.width=7}
+# results_ordered_naiveVsPrimed <- res_genotype_state_naiveVsPrimed_interaction[head(order(res_genotype_state_naiveVsPrimed_interaction$padj), 30), ]
+
+# Let's use Wald Stats, for sorting genes.
+results_ordered_naiveVsPrimed_down_wald <- res_genotype_state_naiveVsPrimed_interaction[head(order(res_genotype_state_naiveVsPrimed_interaction$stat), 15), ]
+results_ordered_naiveVsPrimed_up_wald <- res_genotype_state_naiveVsPrimed_interaction[head(order(res_genotype_state_naiveVsPrimed_interaction$stat, decreasing = T), 15), ]
+results_ordered_naiveVsPrimed_wald <- rbind(results_ordered_naiveVsPrimed_up_wald, results_ordered_naiveVsPrimed_down_wald)
+
+significant_genes_naiveVsPrimed <- subset(results_ordered_naiveVsPrimed_wald, abs(stat) > 5)
+normalized_significant_genes_naiveVsPrimed <- countsDESeq2NormLog2[rownames(significant_genes_naiveVsPrimed), ]
+
+# Could also use the normalized log2 counts
+# results_ordered_naiveVsPrimed <- sigResults_naive[head(order(sigResults_naive$padj), 30), ]
+# results_ordered_naiveVsPrimed <- res_genotype_state_naiveVsPrimed_interaction
+
+# As there are plenty of DEGs, the next step isn't essential, but like this we will make sure that only genes with low padj are considered.
+# significant_genes_naiveVsPrimed <- subset(results_ordered_naiveVsPrimed, padj < 0.01)
+# significant_genes_naiveVsPrimed <- rbind(significant_genes_naiveVsPrimed, res_genotype_state_naiveVsPrimed_interaction["XIST", ])
+# normalized_significant_genes_naiveVsPrimed <- countsDESeq2NormLog2[rownames(significant_genes_naiveVsPrimed), ]
+
+pheatmap(normalized_significant_genes_naiveVsPrimed,
+         cluster_rows = T,
+         cluster_cols = T,
+         show_rownames = T,
+         border_color = NA,
+         scale = "row", # using scale = "row" allows a better visualization, by plotting z-scores
+         # (gene by gene basis, by subtracting the mean and then dividing by STDev)
+         annotation_col = annotation_dataframe,
+         fontsize_col =10,
+         fontsize_row = 8,
+         cutree_rows = 2, 
+         cutree_cols = 2,
+         angle_col = 45,
+         clustering_method = "ward.D2",
+         main = "Top 30 differentially expressed genes\nPrimed Vs. Naive")
+```
+
+```{r, fig.height=8, fig.width=7}
+# Modify rownames: italicize genes unless they have a "TE_" prefix
+rownames(normalized_significant_genes_naiveVsPrimed) <- sapply(rownames(normalized_significant_genes_naiveVsPrimed), function(x) {
+  if (grepl("^TE_", x)) {
+    return(x)  # Do not italicize if it starts with "TE_"
+  } else {
+    return(paste0("italic('", x, "')"))  # Italicize otherwise
+  }
+})
+
+# Use parse = TRUE to interpret the row names as expressions in pheatmap
+heatmap_genes <- pheatmap(normalized_significant_genes_naiveVsPrimed,
+         cluster_rows = T,
+         cluster_cols = T,
+         show_rownames = T,
+         border_color = NA,
+         scale = "row", # using scale = "row" allows a better visualization, by plotting z-scores
+         # (gene by gene basis, by subtracting the mean and then dividing by STDev)
+         annotation_col = annotation_dataframe,
+         fontsize_col = 10,
+         fontsize_row = 8,
+         cutree_rows = 2, 
+         cutree_cols = 2,
+         angle_col = 45,
+         clustering_method = "ward.D2",
+         main = "Top 30 differentially expressed genes\nPrimed Vs. Naive",
+         labels_row = parse(text = rownames(normalized_significant_genes_naiveVsPrimed))) # Parse the italic expression
+
+heatmap_genes
+```
+```{r, fig.height=7, fig.width=12}
+# Arrange the plots side by side with labels
+final_panel <- ggarrange(
+  volcano_subfamilies, heatmap_genes$gtable,  # Your two plots
+  labels = c("A", "B"),                      # Labels for the plots
+  font.label = list(size = 16, face = "bold", hjust = -1, vjust = 1.5),  # Adjust label position
+  ncol = 2,                                  # Number of columns
+  widths = c(1, .9)                              
+)
+
+
+# Display the final panel
+final_panel
+```
+
+##### TEs
+```{r, fig.height=8, fig.width=7}
+results_ordered_DESeq2_naiveVsPrimed_TEs <- data.frame(res_genotype_state_naiveVsPrimed_interaction[grepl("TE_",rownames(res_genotype_state_naiveVsPrimed_interaction)), ])
+# results_ordered_DESeq2_naiveVsPrimed_TEs_pheatmap <- results_ordered_DESeq2_naiveVsPrimed_TEs[head(order(abs(results_ordered_DESeq2_naiveVsPrimed_TEs$padj), decreasing = F), 30), ]
+# 
+# significant_genes_naiveVsPrimed_TE_pheatmap <- subset(results_ordered_DESeq2_naiveVsPrimed_TEs_pheatmap, padj < 0.01)
+# normalized_significant_genes_naiveVsPrimed_TE_pheatmap <- countsDESeq2NormLog2[rownames(significant_genes_naiveVsPrimed_TE_pheatmap), ]
+# 
+# rownames(normalized_significant_genes_naiveVsPrimed_TE_pheatmap) <- gsub("TE_", "", rownames(normalized_significant_genes_naiveVsPrimed_TE_pheatmap),"")
+
+# Let's do the same for Wald Statistics, instead of padj.
+results_ordered_naiveVsPrimed_TEs_down_wald <- results_ordered_DESeq2_naiveVsPrimed_TEs[head(order(results_ordered_DESeq2_naiveVsPrimed_TEs$stat), 15), ]
+results_ordered_naiveVsPrimed_TEs_up_wald <- results_ordered_DESeq2_naiveVsPrimed_TEs[head(order(results_ordered_DESeq2_naiveVsPrimed_TEs$stat, decreasing = T), 15), ]
+results_ordered_naiveVsPrimed_TEs_wald <- rbind(results_ordered_naiveVsPrimed_TEs_down_wald, results_ordered_naiveVsPrimed_TEs_up_wald)
+
+significant_TEs_naiveVsPrimed <- subset(results_ordered_naiveVsPrimed_TEs_wald, abs(stat) > 5)
+normalized_significant_TEs_naiveVsPrimed <- countsDESeq2NormLog2[rownames(significant_TEs_naiveVsPrimed), ]
+
+rownames(normalized_significant_TEs_naiveVsPrimed) <- gsub("TE_", "", rownames(normalized_significant_TEs_naiveVsPrimed),"")
+
+heatmap_TEs_subfamilies <- pheatmap(normalized_significant_TEs_naiveVsPrimed,
+         cluster_rows = T,
+         cluster_cols = T,
+         show_rownames = T,
+         border_color = NA,
+         scale = "row", # using scale = "row" allows a better visualization, by plotting z-scores
+         # (gene by gene basis, by subtracting the mean and then dividing by STDev)
+         annotation_col = annotation_dataframe,
+         fontsize_col =10,
+         fontsize_row = 8,
+         cutree_rows = 2, 
+         cutree_cols = 2,
+         angle_col = 45,
+         clustering_method = "ward.D2",
+         main = "Top 30 differentially expressed TEs\nPrimed Vs. Naive")
+
+heatmap_TEs_subfamilies
+```
+```{r, fig.height=7, fig.width=12}
+# Arrange the plots side by side with labels
+final_panel_TEs_subfamilies <- ggarrange(
+  volcano_TEs_subfamilies, heatmap_TEs_subfamilies$gtable,  # Your two plots
+  labels = c("A", "B"),                      # Labels for the plots
+  font.label = list(size = 16, face = "bold", hjust = -1, vjust = 1.5),  # Adjust label position
+  ncol = 2,                                  # Number of columns
+  widths = c(.9, 1)                              
+)
+
+
+# Display the final panel
+final_panel_TEs_subfamilies
+```
+
+#### Plotting of individual gene counts of Top DEGs and DETEs
+##### DEGs
+Plot the normalized count values for the top 20 differentially expressed genes (by padj).\
+[**Downregulated Genes**](#downregulated)\
+We will use the downregulated results calculated previously, to plot the most significant downregulated genes
+```{r}
+results_down_naiveVsPrimed <- res_genotype_state_naiveVsPrimed_interaction[which(res_genotype_state_naiveVsPrimed_interaction$log2FoldChange < -2 & res_genotype_state_naiveVsPrimed_interaction$padj < 0.01), ] # Get the downregulated genes
+results_down_naiveVsPrimed_sorted <- results_down_naiveVsPrimed[order(results_down_naiveVsPrimed$log2FoldChange), ] # Sort your results by padj
+top30_results_down_naiveVsPrimed_sorted <- rownames(results_down_naiveVsPrimed_sorted[1:30, ]) # Select the top 30 genes
+#top30_results_down_naiveVsPrimed_sorted <- rownames(results_down_naiveVsPrimed_sorted) # Select all genes
+
+top30_results_down_naiveVsPrimed_sorted_df <- data.frame(countsDESeq2NormLog2[top30_results_down_naiveVsPrimed_sorted, ]) # Extract the normalized read counts for the top 20 genes, from the normalized counts
+top30_results_down_naiveVsPrimed_sorted_df$gene <- rownames(top30_results_down_naiveVsPrimed_sorted_df) # Create a columns with the gene names, from the rownames of the table
+top30_results_down_naiveVsPrimed_sorted_df_melt <- reshape2::melt(top30_results_down_naiveVsPrimed_sorted_df) # Melt the dataframe, into a format that can be read by ggplot2.
+colnames(top30_results_down_naiveVsPrimed_sorted_df_melt) <- c("gene", "samplename", "normalized_counts") # Add column names that make sense
+
+top30_meta <- sample_info # create a meta info
+top30_meta$samplename <- rownames(top30_meta) # create a column with sample name
+
+top30_results_down_naiveVsPrimed_sorted_df_melt <- merge(top30_results_down_naiveVsPrimed_sorted_df_melt, top30_meta) # melt the two tables. Merged on samplename
+
+ggplot(top30_results_down_naiveVsPrimed_sorted_df_melt) +
+  geom_point(aes(x = gene, y = normalized_counts, color = state), position=position_jitter(w=0.1,h=0), size = 1.5) +
+  #scale_y_log10() +
+  xlab("Genes") +
+  ylab("Log2 Normalized Counts") +
+  ggtitle("Genes with highest log2FoldChange in primed hESCs") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(plot.title=element_text(hjust=0.5))
+```
+```{r}
+plot_genes_primed <- ggplot(top30_results_down_naiveVsPrimed_sorted_df_melt) +
+  geom_point(aes(x = gene, y = normalized_counts, fill = state), 
+             shape = 21, color = "black", stroke = .7, # Use shape 21 and black border
+             position = position_jitter(w = 0.2, h = 0), size = 2.5, alpha = 0.5) +  # Adjusted size and alpha
+  scale_fill_manual(values = c("primed" = "#D55E00", "naive" = "#0072B2")) +  # Custom fill colors
+  xlab("Genes") +
+  ylab("Log2 Normalized Counts") +
+  ggtitle("Genes with highest log2FoldChange in primed hESCs") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),  # Larger font for x-axis labels
+        axis.text.y = element_text(size = 10),                          # Larger font for y-axis labels
+        axis.title.x = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"), # Title style
+        legend.title = element_blank(),
+        legend.position = "right") +  # Adjust margins to prevent clipping
+  guides(fill = guide_legend(override.aes = list(size = 5)))  # Increase legend point size
+
+plot_genes_primed
+```
+
+
+[**Upregulated Genes**](#downregulated)\
+We will use the upregulated results calculated previously, to plot the most significant upregulated genes.
+```{r}
+results_up_naiveVsPrimed <- res_genotype_state_naiveVsPrimed_interaction[which(res_genotype_state_naiveVsPrimed_interaction$log2FoldChange > 2 & res_genotype_state_naiveVsPrimed_interaction$padj < 0.01), ] # Get the downregulated genes
+results_up_naiveVsPrimed_sorted <- results_up_naiveVsPrimed[order(results_up_naiveVsPrimed$log2FoldChange, decreasing = T), ] # Sort your results by padj
+top30_results_up_naiveVsPrimed_sorted <- rownames(results_up_naiveVsPrimed_sorted[1:30, ]) # Select the top 20 genes
+#top30_results_up_naiveVsPrimed_sorted = rownames(results_up_naiveVsPrimed_sorted) # Select all top genes
+
+top30_genes_up_naiveVsPrimed_df <- data.frame(countsDESeq2NormLog2[top30_results_up_naiveVsPrimed_sorted, ]) # Extract the normalized read counts for the top 20 genes, from the normalized counts
+top30_genes_up_naiveVsPrimed_df$gene <- rownames(top30_genes_up_naiveVsPrimed_df) # Create a columns with the gene names, from the rownames of the table
+top30_genes_up_naiveVsPrimed_df_melt <- reshape2::melt(top30_genes_up_naiveVsPrimed_df) # Melt the dataframe, into a format that can be read by ggplot2.
+colnames(top30_genes_up_naiveVsPrimed_df_melt) <- c("gene", "samplename", "normalized_counts") # Add column names that make sense
+
+top30_meta <- sample_info # create a meta info
+top30_meta$samplename <- rownames(top30_meta) # create a column with sample name
+
+top30_genes_up_naiveVsPrimed_df_melt <- merge(top30_genes_up_naiveVsPrimed_df_melt, top30_meta) # melt the two tables. Merged on samplename
+
+ggplot(top30_genes_up_naiveVsPrimed_df_melt) +
+  geom_point(aes(x = gene, y = normalized_counts, color = state), position=position_jitter(w=0.1,h=0), size = 1.5) +
+  #scale_y_log10() +
+  xlab("Genes") +
+  ylab("Log2 Normalized Counts") +
+  ggtitle("Top Significantly upregulated Genes in naive hESCs\n(sorted by log2FoldChange), padj < 0.01, log2FoldChange > 1") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(plot.title=element_text(hjust=0.5))
+```
+```{r}
+plot_genes_naive <- ggplot(top30_genes_up_naiveVsPrimed_df_melt) +
+  geom_point(aes(x = gene, y = normalized_counts, fill = state), 
+             shape = 21, color = "black", stroke = .7, # Use shape 21 and black border
+             position = position_jitter(w = 0.2, h = 0), size = 2.5, alpha = 0.5) +  # Adjusted size and alpha
+  scale_fill_manual(values = c("primed" = "#D55E00", "naive" = "#0072B2")) +  # Custom fill colors
+  xlab("Genes") +
+  ylab("Log2 Normalized Counts") +
+  ggtitle("Genes with highest log2FoldChange in naive hESCs") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),  # Larger font for x-axis labels
+        axis.text.y = element_text(size = 10),                          # Larger font for y-axis labels
+        axis.title.x = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"), # Title style
+        legend.title = element_blank(),
+        legend.position = "right") +  # Adjust margins to prevent clipping
+  guides(fill = guide_legend(override.aes = list(size = 5)))  # Increase legend point size
+
+plot_genes_naive
+```
+```{r, fig.width=7.3, fig.height=9}
+# Arrange the two plots in a single column (one on top of the other)
+combined_panel <- ggarrange(plot_genes_primed, plot_genes_naive,
+                            labels = c("A", "B"),  # Label the plots as A and B
+                            ncol = 1, nrow = 2)  # One column, two rows
+
+combined_panel
+```
+
+##### DETEs
+Plot the normalized count values for the top 20 differentially expressed TEs (by padj).\
+[**Downregulated TEs**](#downregulated)\
+We will use the downregulated results calculated previously, to plot the most significant downregulated TEs.
+```{r}
+results_down_naiveVsPrimed_TEs <- res_genotype_state_naiveVsPrimed_interaction[grepl("TE_",rownames(res_genotype_state_naiveVsPrimed_interaction)), ]
+results_down_naiveVsPrimed_TEs <- results_down_naiveVsPrimed_TEs[which(results_down_naiveVsPrimed_TEs$log2FoldChange < -1 & results_down_naiveVsPrimed_TEs$padj < 0.01), ] # Get the downregulated genes
+results_down_naiveVsPrimed_TEs_sorted <- results_down_naiveVsPrimed_TEs[order(results_down_naiveVsPrimed_TEs$stat), ] # Sort your results by Wald Statistic
+top30_results_down_naiveVsPrimed_TEs_sorted <- rownames(results_down_naiveVsPrimed_TEs_sorted[1:30, ]) # Select the top 30 genes
+
+top30_results_down_naiveVsPrimed_TEs_sorted_df <- data.frame(countsDESeq2NormLog2[top30_results_down_naiveVsPrimed_TEs_sorted, ]) # Extract the normalized read counts for the top 20 genes, from the normalized counts
+top30_results_down_naiveVsPrimed_TEs_sorted_df$gene <- gsub("TE_", "", rownames(top30_results_down_naiveVsPrimed_TEs_sorted_df)) # Create a columns with the gene names, from the rownames of the table
+top30_results_down_naiveVsPrimed_TEs_sorted_df_melt <- reshape2::melt(top30_results_down_naiveVsPrimed_TEs_sorted_df) # Melt the dataframe, into a format that can be read by ggplot2.
+colnames(top30_results_down_naiveVsPrimed_TEs_sorted_df_melt) <- c("TE", "samplename", "normalized_counts") # Add column names that make sense
+
+top30_meta <- sample_info # create a meta info
+top30_meta$samplename <- rownames(top30_meta) # create a column with sample name
+
+top30_results_down_naiveVsPrimed_TEs_sorted_df_melt <- merge(top30_results_down_naiveVsPrimed_TEs_sorted_df_melt, top30_meta) # melt the two tables. Merged on samplename
+
+ggplot(top30_results_down_naiveVsPrimed_TEs_sorted_df_melt) +
+  geom_point(aes(x = TE, y = normalized_counts, color = state), position=position_jitter(w=0.1,h=0), size = 1.5) +
+  xlab("TEs") +
+  ylab("Log2 Normalized Counts") +
+  ggtitle("Top Significantly upregulated TEs in primed hESCs\n(sorted by Wald Statistics), padj < 0.01, log2FoldChange < -1") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(plot.title=element_text(hjust=0.5))
+```
+```{r}
+plot_TE_subfamilies_primed <- ggplot(top30_results_down_naiveVsPrimed_TEs_sorted_df_melt) +
+  geom_point(aes(x = TE, y = normalized_counts, fill = state), 
+             shape = 21, color = "black", stroke = .7, # Use shape 21 and black border
+             position = position_jitter(w = 0.2, h = 0), size = 2.5, alpha = 0.5) +  # Adjusted size and alpha
+  scale_fill_manual(values = c("primed" = "#D55E00", "naive" = "#0072B2")) +  # Custom fill colors
+  xlab("Genes") +
+  ylab("Log2 Normalized Counts") +
+  ggtitle("TEs with highest log2FoldChange in primed hESCs") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),  # Larger font for x-axis labels
+        axis.text.y = element_text(size = 10),                          # Larger font for y-axis labels
+        axis.title.x = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"), # Title style
+        legend.title = element_blank(),
+        legend.position = "right") +  # Adjust margins to prevent clipping
+  guides(fill = guide_legend(override.aes = list(size = 5)))  # Increase legend point size
+
+plot_TE_subfamilies_primed
+```
+
+[**Upregulated TEs**](#downregulated)\
+We will use the upregulated results calculated previously, to plot the most significant upregulated TEs.
+```{r}
+results_up_naiveVsPrimed_TEs <- res_genotype_state_naiveVsPrimed_interaction[grepl("TE_",rownames(res_genotype_state_naiveVsPrimed_interaction)), ]
+results_up_naiveVsPrimed_TEs <- results_up_naiveVsPrimed_TEs[which(results_up_naiveVsPrimed_TEs$log2FoldChange > 1 & results_up_naiveVsPrimed_TEs$padj < 0.01), ] # Get the downregulated genes
+results_up_naiveVsPrimed_TEs_sorted <- results_up_naiveVsPrimed_TEs[order(results_up_naiveVsPrimed_TEs$stat, decreasing = T), ] # Sort your results by Wald Statistic
+top30_results_up_naiveVsPrimed_TEs_sorted <- rownames(results_up_naiveVsPrimed_TEs_sorted[1:30, ]) # Select the top 30 genes
+
+
+top30_results_up_naiveVsPrimed_TEs_sorted_df <- data.frame(countsDESeq2NormLog2[top30_results_up_naiveVsPrimed_TEs_sorted, ]) # Extract the normalized read counts for the top 20 genes, from the normalized counts
+top30_results_up_naiveVsPrimed_TEs_sorted_df$gene <- gsub("TE_", "", rownames(top30_results_up_naiveVsPrimed_TEs_sorted_df)) # Create a columns with the gene names, from the rownames of the table
+top30_results_up_naiveVsPrimed_TEs_sorted_df_melt <- reshape2::melt(top30_results_up_naiveVsPrimed_TEs_sorted_df) # Melt the dataframe, into a format that can be read by ggplot2.
+colnames(top30_results_up_naiveVsPrimed_TEs_sorted_df_melt) <- c("TE", "samplename", "normalized_counts") # Add column names that make sense
+
+top30_meta <- sample_info # create a meta info
+top30_meta$samplename <- rownames(top30_meta) # create a column with sample name
+
+top30_results_up_naiveVsPrimed_TEs_sorted_df_melt <- merge(top30_results_up_naiveVsPrimed_TEs_sorted_df_melt, top30_meta) # melt the two tables. Merged on samplename
+
+ggplot(top30_results_up_naiveVsPrimed_TEs_sorted_df_melt) +
+  geom_point(aes(x = TE, y = normalized_counts, color = state), position=position_jitter(w=0.1,h=0), size = 1.5) +
+  #scale_y_log10() +
+  xlab("TEs") +
+  ylab("Log2 Normalized Counts") +
+  ggtitle("Top Significantly upregulated TEs in naive hESCs\n(sorted by Wald Statistics), padj < 0.01, log2FoldChange > 1") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(plot.title=element_text(hjust=0.5))
+```
+```{r}
+plot_TE_subfamilies_naive <- ggplot(top30_results_up_naiveVsPrimed_TEs_sorted_df_melt) +
+  geom_point(aes(x = TE, y = normalized_counts, fill = state), 
+             shape = 21, color = "black", stroke = .7, # Use shape 21 and black border
+             position = position_jitter(w = 0.2, h = 0), size = 2.5, alpha = 0.5) +  # Adjusted size and alpha
+  scale_fill_manual(values = c("primed" = "#D55E00", "naive" = "#0072B2")) +  # Custom fill colors
+  xlab("Genes") +
+  ylab("Log2 Normalized Counts") +
+  ggtitle("TEs with highest log2FoldChange in naive hESCs") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),  # Larger font for x-axis labels
+        axis.text.y = element_text(size = 10),                          # Larger font for y-axis labels
+        axis.title.x = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"), # Title style
+        legend.title = element_blank(),
+        legend.position = "right") +  # Adjust margins to prevent clipping
+  guides(fill = guide_legend(override.aes = list(size = 5)))  # Increase legend point size
+
+plot_TE_subfamilies_naive
+```
+```{r, fig.width=7.3, fig.height=9}
+# Arrange the two plots in a single column (one on top of the other)
+combined_panel_TEs_subfamilies <- ggarrange(plot_TE_subfamilies_primed, plot_TE_subfamilies_naive,
+                            labels = c("A", "B"),  # Label the plots as A and B
+                            ncol = 1, nrow = 2)  # One column, two rows
+
+combined_panel_TEs_subfamilies
+```
+
+##### Acessing the values for specific genes
+We can use the `genePlot` function, to get the normalized gene counts per sample and per condition.
+```{r, fig.height=6, fig.width=7}
+genePlot(dds, "DNMT3L", "condition")
+```
+```{r, fig.height=6, fig.width=7}
+genePlot(dds, "XIST", "condition")
+```
+```{r, fig.height=6, fig.width=7}
+genePlot(dds, "XACT", "condition")
+```
+```{r, fig.height=6, fig.width=7}
+genePlot(dds, "KLF4", "condition")
+```
+```{r, fig.height=6, fig.width=7}
+genePlot(dds, "MYC", "condition")
+```
+```{r, fig.height=6, fig.width=7}
+genePlot(dds, "TE_LTR7", "condition")
+```
+```{r, fig.height=6, fig.width=7}
+genePlot(dds, "TE_LTR5", "condition")
+```
+#### Functional analysis {.tabset .tabset-pills}
+##### **GO term analysis**
+The following code, will take the list of genes that are considered DEGs, and try to find a correlation with different biological, cellular, or molecular processes. This analysis, does not allow inferring whether there is a positive or negative association between the identified term and the test condition. The code is made for a single culture condition, but could be adapted for the different conditions.
+
+We first define the significant genes (padj < 0.05 and |log2FC| > 1).
+```{r}
+# We extract only DEGs
+significant_results_naiveVsPrimed_Genes <- sigResults_LFC1_naiveVsPrimed_Genes_TEs[!grepl("TE_",rownames(sigResults_LFC1_naiveVsPrimed_Genes_TEs)), ]
+# significant_results_naiveVsPrimed_Genes
+
+# And finally, we extract DETEs
+significant_results_naiveVsPrimed_TEs <- sigResults_LFC1_naiveVsPrimed_Genes_TEs[grepl("TE_",rownames(sigResults_LFC1_naiveVsPrimed_Genes_TEs)), ]
+# significant_results_naiveVsPrimed_TEs
+
+all_genes <- as.character(rownames(res_genotype_state_naiveVsPrimed_interaction[!grepl("TE_",rownames(res_genotype_state_naiveVsPrimed_interaction)), ]))
+sig_genes <- as.character(rownames(sigResults_LFC1_naiveVsPrimed_Genes_TEs[!grepl("TE_",rownames(sigResults_LFC1_naiveVsPrimed_Genes_TEs)), ]))
+up_genes <- as.character(rownames(results_upregulated_naiveVsPrimed_Genes_TEs[!grepl("TE_",rownames(results_upregulated_naiveVsPrimed_Genes_TEs)), ]))
+down_genes <- as.character(rownames(results_downregulated_naiveVsPrimed_Genes_TEs[!grepl("TE_",rownames(results_downregulated_naiveVsPrimed_Genes_TEs)), ]))  
+```
+We then need to choose from one ontology:
+
+* **Biological Process (BP):  	biological_process [GO:0008150] <30>**
+* **Cellular Component (CC):  	cellular_component [GO:0005575] <22>**
+* **Molecular Function (MF):  	molecular_function [GO:0003674] <15>**
+* **Or "ALL"**
+```{r}
+ego <- enrichGO(gene          = sig_genes,
+                universe      = all_genes, 
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'SYMBOL',
+                ont           = "ALL",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.01)
+```
+```{r}
+cluster_summary <- data.frame(ego)
+
+cluster_summary %>% 
+  arrange(p.adjust) %>% 
+  DT::datatable()
+```
+Let's plot the GO term analysis using a dotplot. This represents the enriched GO terms, pvalue and number of genes represented for that term.
+```{r, fig.height=8, fig.width=7}
+dotplot(ego, 
+        x = "GeneRatio", 
+        color = "p.adjust", 
+        showCategory=20, 
+        orderBy = "x",
+        title = "GO All Ontologies")
+```
+We can also represent this with barplots.
+```{r, fig.height=9, fig.width=7}
+barplot(ego, 
+        drop = TRUE, 
+        showCategory = 20, 
+        title = "GO All Ontologies",
+        font.size = 12)
+```
+We can also visualize these using an `Upset plot`.These are used to emphasize the genes overlapping among different gene sets.
+```{r, fig.width=10}
+upsetplot(ego)
+```
+Enrichment maps - Organize enriched terms into a network with edges connecting overlapping gene sets. This makes it easy to identify functional modules.
+```{r, fig.width=8, fig.height=7}
+emapplot(pairwise_termsim(ego),
+         repel = T,
+         cex_label_category = .6)
+```
+Category Netplot - Useful to see which genes are involved in enriched pathways and genes that may belong to multiple annotation categories.
+These can be colored by log2FoldChange.
+```{r, fig.width=8, fig.height=7}
+sig_genes_log2FoldChange <- significant_results_naiveVsPrimed_Genes$log2FoldChange
+names(sig_genes_log2FoldChange) <- rownames(significant_results_naiveVsPrimed_Genes)
+
+cnetplot(ego, 
+         categorySize="pvalue", 
+         showCategory = 5,
+         foldChange=sig_genes_log2FoldChange,
+         cex_label_category = .8,
+         cex_label_gene = .5,
+         repel = F)
+```
+##### **GSEA of Gene Ontology using `Clusterprofiler`**
+We can perform GSEA with the DEGs, using gene ontology terms, as we did above.
+```{r}
+geneList <- res_genotype_state_naiveVsPrimed_interaction$stat
+names(geneList) <- rownames(res_genotype_state_naiveVsPrimed_interaction)
+geneList <- na.omit(geneList)
+geneList <- sort(geneList, decreasing = TRUE)
+
+gse <- gseGO(geneList=geneList, 
+             ont ="ALL", 
+             keyType = "SYMBOL", 
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Hs.eg.db, 
+             pAdjustMethod = "BH",
+             eps = 0)
+```
+```{r, fig.width=10, fig.height=7.5}
+require(DOSE)
+dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign)
+```
+Enrichment Map- Organizes enriched terms into a network with edges connecting over-lapping gene sets. This allows identification of overlapping gene sets and identification of functional modules.
+```{r, fig.width=8, fig.height=6}
+emapplot(pairwise_termsim(gse), showCategory = 20)
+```
+Category Netplot- Depicts linkage of genes and biological concepts as a network.
+```{r}
+geneList_log2FoldChange <- res_genotype_state_naiveVsPrimed_interaction$log2FoldChange
+names(geneList_log2FoldChange) <- rownames(res_genotype_state_naiveVsPrimed_interaction)
+geneList_log2FoldChange <- na.omit(geneList_log2FoldChange)
+geneList_log2FoldChange <- sort(geneList_log2FoldChange, decreasing = TRUE)
+
+cnetplot(gse, 
+         categorySize="pvalue", 
+         foldChange=geneList_log2FoldChange, 
+         showCategory = 10)
+```
+Ridgeplot- Grouped by gene set, density plots are generated by using the frequency of fold change values per gene within each set. Helps interpreting up and down-regulated pathways.
+```{r, fig.width=10, fig.height=9}
+ridgeplot(gse) + labs(x = "enrichment distribution")
+```
+We can also visualize the GSEA profile for each geneset. For this, we use the `Gene Set` param for the index in the title, and as the value for geneSetId. Gene set corresponds to different enriched gene sets, organized by pvalue (I guess). This should be changed if required. Both in description and geneSetID.
+```{r, fig.height=5}
+gseaplot(gse, by = "all", title = gse$Description[1], geneSetID = 1)
+```
+##### **Gene Set Enrichment Analysis**
+The following code is used to perform GSEA: use a ranked list of DEGs to calculate a positive or negative association with specific genesets (set of genes, whose behaviour in terms of up or downregulation, has been documented in different types of circumstances. These can be developmental, disease, etc...).
+
+We start by creating a Rank Gene table, for GSEA analysis (to use with Broad Institute's GSEA app or `fgsea` library).
+```{r}
+RNK_NaiveVsPrimed <- data.table(Gene_Name = rownames(res_genotype_state_naiveVsPrimed_interaction), stat = res_genotype_state_naiveVsPrimed_interaction$stat) #These are 2 columns from our deseq2 output that we need for GSEA
+RNK_NaiveVsPrimed <- subset(RNK_NaiveVsPrimed, stat != "NA")
+
+#write.table(RNK_NaiveVsPrimed, "~/Data/H9hESCs/analysis/results/subfamiliesTEs/RNK_NaiveVsPrimed.rnk",quote=F,sep="\t", row.names = F)
+```
+```{r}
+head(RNK_NaiveVsPrimed[order(RNK_NaiveVsPrimed$stat, decreasing = TRUE), ])
+```
+```{r}
+head(RNK_NaiveVsPrimed[order(RNK_NaiveVsPrimed$stat, decreasing = FALSE), ])
+```
+The first thing we need to do, is to load a given geneset. We start by loading the "Hallmark" genesets: "Hallmark gene sets summarize and represent specific well-defined biological states or processes and display coherent expression".\
+In addition, we also load all of the genesets and the curated gene set ("Gene sets in this collection are curated from various sources, including online pathway databases and the biomedical literature. Many sets are also contributed by individual domain experts. The gene set page for each gene set lists its source. The C2 collection is divided into the following two sub-collections: Chemical and genetic perturbations (CGP) and Canonical pathways (CP).").
+```{r}
+pathways.all <- gmtPathways("~/Data/Angelman/20220317_Organoids/analysis/results/Genesets/conventionalGenesets/msigdb.v7.5.1.symbols.gmt")
+pathways.hallmark <- gmtPathways("~/Data/Angelman/20220317_Organoids/analysis/results/Genesets/conventionalGenesets/h.all.v7.5.1.symbols.gmt")
+pathways.curated <- gmtPathways("~/Data/Angelman/20220317_Organoids/analysis/results/Genesets/conventionalGenesets/c2.all.v7.5.1.symbols.gmt")
+```
+
+The above pathways also exist in `msigDB`. As such, these genesets can also be loaded progamatically using the `msigdbr` R library. 
+```{r}
+library(msigdbr)
+
+human.pathways.all <- msigdbr(species = "Homo sapiens")
+human.pathways.all_gsets <- human.pathways.all %>% 
+  split(x = .$gene_symbol, f = .$gs_name)
+# for (hallmark in names(human.pathways.all_gsets)){
+#   human.pathways.all_gsets[[hallmark]] <- toupper(human.pathways.all_gsets[[hallmark]])}
+pathways.all <- human.pathways.all_gsets
+
+human.pathways.all.hallmark <- msigdbr(species = "Homo sapiens", category = "H")
+human.pathways.all.hallmark_gsets <- human.pathways.all.hallmark %>% 
+  split(x = .$gene_symbol, f = .$gs_name)
+# for (hallmark in names(human.pathways.all.hallmark_gsets)){
+#   human.pathways.all.hallmark_gsets[[hallmark]] <- toupper(human.pathways.all.hallmark_gsets[[hallmark]])}
+pathways.hallmark <- human.pathways.all.hallmark_gsets
+
+human.pathways.curated <- msigdbr(species = "Homo sapiens", category = "C2")
+human.pathways.curated_gsets <- human.pathways.curated %>% 
+  split(x = .$gene_symbol, f = .$gs_name)
+# for (hallmark in names(human.pathways.curated_gsets)){
+#   human.pathways.curated_gsets[[hallmark]] <- toupper(human.pathways.curated_gsets[[hallmark]])}
+pathways.curated <- human.pathways.curated_gsets
+```
+```{r}
+# Look at them all if you want (uncomment)
+#pathways.hallmark
+
+# Show the first few pathways, and within those, show only the first few genes. 
+pathways.hallmark %>% 
+  head() %>% 
+  lapply(head)
+```
+One can search for specific genesets, searching in http://www.gsea-msigdb.org/gsea/msigdb/search.jsp
+
+***
+
+###### **Hallmark Gene sets**
+Let's first check the hallmark genesets.
+```{r}
+# Now, run the fgsea algorithm with 1000 permutations
+library(tibble)
+RNK_NaiveVsPrimed_deframed <- deframe(RNK_NaiveVsPrimed)
+# fgseaRes <- fgseaSimple(pathways=pathways.hallmark, 
+#                         stats=RNK_NaiveVsPrimed_deframed, 
+#                         nperm = 1000,
+#                         minSize = 15,
+#                         maxSize = 500)
+fgseaRes <- fgseaMultilevel(
+  pathways=pathways.hallmark,
+  stats=RNK_NaiveVsPrimed_deframed, 
+  eps = 0.0,
+  nPermSimple = 100000,
+  minSize = 15,
+  maxSize = Inf)
+```
+Tidy the results and show it in a nice table
+```{r}
+fgseaResTidy <- fgseaRes %>%
+  as_tibble() %>%
+  arrange(desc(NES))
+
+fgseaResTidy %>% 
+  dplyr::select(-leadingEdge, -ES) %>% 
+  arrange(padj) %>% 
+  DT::datatable()
+```
+ Plot the normalized enrichment scores. Color the bar indicating whether or not the pathway is significant.
+```{r, fig.width=10, fig.height=7}
+fgseaResTidySorted <- fgseaResTidy[order(fgseaResTidy$padj),]
+
+ggplot(fgseaResTidySorted[c(1:30),], 
+       aes(reorder(pathway, NES), NES)) +
+  geom_col(aes(fill=padj<0.05)) +
+  coord_flip() +
+  labs(x="Pathway", y="Normalized Enrichment Score",
+       title="Hallmark pathways from GSEA - Naive Vs. Primed") + 
+  theme_minimal()
+```
+***
+
+###### **All available Gene sets**
+We will next look at specifically selected pathways. For this, we re-run the `fgsea` function with all of the available genesets. This is a very high number of genesets and, as such, has a few peculiarities: 
+
+* increasing the number of genesets (and tests performed), will make the adjusted p-value more strict. This will have the consequence of losing statistically significant associations that are weaker (are on the border of statistical significance). **As such, one can be a bit more permissive when performing GSEA with such a high number of tests.**. A careful observation of the NES, the GSEA enrichment graphs, is of paramount importance to judge whether a given geneset has an association with the list of DEGs in the experiment.
+* it allows finding associations that weren't suspected and might be of biological relevance.
+```{r}
+fgseaResAll <- fgseaMultilevel(
+  pathways=pathways.all,
+  stats=RNK_NaiveVsPrimed_deframed, 
+  eps = 0.0,
+  nPermSimple = 10000,
+  minSize = 15,
+  maxSize = Inf)
+```
+```{r}
+fgseaResAllTidy <- fgseaResAll %>%
+  as_tibble() %>%
+  arrange(desc(NES))
+
+fgseaResAllTidy %>% 
+  dplyr::select(-leadingEdge, -ES) %>% 
+  arrange(padj) %>% 
+  DT::datatable()
+```
+And we can now plot enrichment plots for specific pathways.
+```{r}
+plotEnrichment(pathways.all[["HALLMARK_APOPTOSIS"]],
+               RNK_NaiveVsPrimed_deframed) + labs(title="HALLMARK_APOPTOSIS")
+```
+We can also make a table plot to explore the top pathways.
+```{r}
+topPathwaysUp <- fgseaResAll[ES > 0][head(order(pval), n=10), pathway]
+topPathwaysDown <- fgseaResAll[ES < 0][head(order(pval), n=10), pathway]
+topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+
+GSEATable <- plotGseaTable(pathways = pathways.all[topPathways], 
+              stats = RNK_NaiveVsPrimed_deframed, 
+              fgseaRes = fgseaResAll, 
+              gseaParam=0.5,
+              render = FALSE)
+```
+```{r, fig.width=21}
+as_ggplot(GSEATable)
+```
+
+In addition, we can choose specific pathways to visualize their enrichment profiles.
+```{r}
+
+selectedPathways <- c("HALLMARK_APOPTOSIS", "HALLMARK_DNA_REPAIR", "HALLMARK_G2M_CHECKPOINT",
+                      "HALLMARK_REACTIVE_OXYGEN_SPECIES_PATHWAY")
+
+
+GSEATable <- plotGseaTable(pathways = pathways.all[selectedPathways], 
+              stats = RNK_NaiveVsPrimed_deframed, 
+              fgseaRes = fgseaResAll, 
+              gseaParam=0.5,
+              render = FALSE)
+```
+```{r, fig.width=12}
+as_ggplot(GSEATable)
+```
+
+***
+
+###### **Curated signatures Gene sets**
+Next, we load the curated genesets.
+```{r}
+fgseaResCurated <- fgseaMultilevel(
+  pathways=pathways.curated,
+  stats=RNK_NaiveVsPrimed_deframed, 
+  eps = 0.0,
+  nPermSimple = 100000,
+  minSize = 15,
+  maxSize = Inf)
+```
+```{r}
+fgseaResCuratedTidy <- fgseaResCurated %>%
+  as_tibble() %>%
+  arrange(desc(NES))
+
+fgseaResCuratedTidy %>% 
+  dplyr::select(-leadingEdge, -ES) %>% 
+  arrange(padj) %>% 
+  DT::datatable()
+```
+
+We can make a table plot to explore the top pathways.
+```{r}
+topPathwaysUp <- fgseaResCurated[ES > 0][head(order(pval), n=10), pathway]
+topPathwaysDown <- fgseaResCurated[ES < 0][head(order(pval), n=10), pathway]
+topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+
+GSEATable <- plotGseaTable(pathways = pathways.curated[topPathways], 
+              stats = RNK_NaiveVsPrimed_deframed, 
+              fgseaRes = fgseaResCurated, 
+              gseaParam=0.5,
+              render = FALSE)
+```
+```{r, fig.width=21}
+as_ggplot(GSEATable)
+```
